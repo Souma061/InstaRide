@@ -1,0 +1,22 @@
+{
+  "name": "rt-ride-matching-system",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Real-Time Ride Matching Platform",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "tsx src/server.ts",
+    "test": "node test_benchmark.js"
+  },
+  "dependencies": {
+    "@fastify/websocket": "^11.3.0",
+    "fastify": "^5.12.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.1",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}
