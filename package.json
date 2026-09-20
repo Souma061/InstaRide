@@ -7,11 +7,18 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "tsx src/server.ts",
-    "test": "node test_benchmark.js"
+    "test": "tsx tests/test_driver_registry.ts",
+    "test:registry": "tsx tests/test_driver_registry.ts",
+    "test:concurrency": "tsx tests/test_concurrency_race.ts",
+    "test:quadtree": "tsx tests/test_quadtree.ts",
+    "test:dryrun": "tsx tests/quadtree.dryrun.ts",
+    "test:state-machine": "tsx tests/test_trip_state_machine.ts",
+    "test:matching": "tsx tests/test_matching_service.ts"
   },
   "dependencies": {
     "@fastify/websocket": "^11.3.0",
-    "fastify": "^5.12.5"
+    "fastify": "^5.12.5",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@types/node": "^26.6.1",

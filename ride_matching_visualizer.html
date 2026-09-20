@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>InstaRide - Real-Time Spatial Ride Matching Simulator</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    canvas {
+      image-rendering: pixelated;
+      background: radial-gradient(circle at 50% 50%, #111827 0%, #030712 100%);
+    }
+  </style>
+</head>
+
+<body class="bg-[var(--background)] text-[var(--foreground)] antialiased p-4 font-sans select-none">
+  <div class="max-w-7xl mx-auto space-y-4">
+
+    <!-- Top Header & Metrics Bar -->
+    <header
+      class="flex flex-wrap items-center justify-between gap-4 p-4 bg-[var(--card)] border border-[var(--border)] rounded-2xl shadow-sm">
+      <div class="flex items-center gap-3">
+        <div
+          class="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-black text-xl">
+          ⚡
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <h1 class="font-bold text-lg text-[var(--foreground)] tracking-tight">InstaRide Real-Time Spatial Engine
+            </h1>
+            <div id="ws-badge"
+              class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-zinc-800 text-zinc-400 border border-zinc-700 flex items-center gap-1.5">
+              <span class="w-1.5 h-1.5 rounded-full bg-zinc-500"></span> Connecting...
+            </div>
+          </div>
+          <p class="text-xs text-[var(--muted-foreground)]">In-Memory Point-Region Quadtree + Atomic CAS Concurrency +
+            Trip State Machine</p>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-4 flex-wrap text-xs">
+        <div class="px-3 py-2 bg-[var(--background)] border border-[var(--border)] rounded-xl flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+          <span class="text-[var(--muted-foreground)]">Available Drivers:</span>
+          <span id="stat-available" class="font-bold text-emerald-400 text-sm">40</span>
+        </div>
+        <div class="px-3 py-2 bg-[var(--background)] border border-[var(--border)] rounded-xl flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-amber-400"></span>
+          <span class="text-[var(--muted-foreground)]">Locked / In-Trip:</span>
+          <span id="stat-busy" class="font-bold text-amber-400 text-sm">0</span>
+        </div>
+        <div class="px-3 py-2 bg-[var(--background)] border border-[var(--border)] rounded-xl flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-cyan-400"></span>
+          <span class="text-[var(--muted-foreground)]">Quadtree Nodes:</span>
+          <span id="stat-nodes" class="font-bold text-cyan-400 text-sm">17</span>
+        </div>
+        <div class="px-3 py-2 bg-[var(--background)] border border-[var(--border)] rounded-xl flex items-center gap-2">
+          <span class="text-[var(--muted-foreground)]">k-NN Latency:</span>
+          <span id="stat-latency" class="font-bold text-purple-400 text-sm">0.08 ms</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Simulator Grid -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+
+      <!-- Map & Quadtree Canvas (2 Cols) -->
+      <div
+        class="lg:col-span-2 bg-[var(--card)] border border-[var(--border)] rounded-2xl p-4 flex flex-col shadow-sm relative overflow-hidden">
+        <div class="flex items-center justify-between pb-3 border-b border-[var(--border)] mb-3">
+          <div class="flex items-center gap-2">
+            <span class="font-semibold text-sm">San Francisco Spatial Bounds</span>
+            <span class="text-xs px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">Click
+              map to move Rider</span>
+          </div>
+          <div class="flex items-center gap-3 text-xs">
+            <label class="flex items-center gap-1.5 cursor-pointer">
+              <input type="checkbox" id="toggle-grid" checked
+                class="rounded border-zinc-700 text-cyan-500 focus:ring-0">
+              <span class="text-[var(--muted-foreground)]">Quadtree Grid</span>
+            </label>
+            <label class="flex items-center gap-1.5 cursor-pointer">
+              <input type="checkbox" id="toggle-traffic" checked
+                class="rounded border-zinc-700 text-emerald-500 focus:ring-0">
+              <span class="text-[var(--muted-foreground)]">Simulate Traffic</span>
+            </label>
+          </div>
+        </div>
+
+        <div
+          class="relative w-full aspect-[4/3] rounded-xl overflow-hidden border border-[var(--border)] cursor-crosshair">
+          <canvas id="sim-canvas" width="800" height="600" class="w-full h-full block"></canvas>
+        </div>
+
+        <!-- Canvas Legend -->
+        <div
+          class="flex items-center justify-between pt-3 mt-3 border-t border-[var(--border)] text-xs text-[var(--muted-foreground)]">
+          <div class="flex items-center gap-4 flex-wrap">
+            <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+              Available (in Quadtree)</span>
+            <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span> 15s
+              Offer Lock</span>
+            <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-blue-400"></span> En
+              Route</span>
+            <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-rose-400"></span> In
+              Progress</span>
+            <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-purple-400"></span> Rider
+              (Pickup)</span>
+          </div>
+          <span class="text-[10px] text-zinc-500 font-mono">SF: [-122.527, 37.708] to [-122.348, 37.832]</span>
+        </div>
+      </div>
+
+      <!-- Control Panel & Trip State Machine HUD (1 Col) -->
+      <div class="space-y-4 flex flex-col">
+
+        <!-- Actions Card -->
+        <div class="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-4 space-y-3 shadow-sm">
+          <h2 class="font-semibold text-sm flex items-center gap-2">
+            <span>🎮</span> Live Interactive Scenarios
+          </h2>
+          <div class="grid grid-cols-2 gap-2 text-xs">
+            <button id="btn-request"
+              class="px-3 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-semibold shadow-sm transition active:scale-95 flex items-center justify-center gap-1.5">
+              <span>🚀</span> Request Ride
+            </button>
+            <button id="btn-race"
+              class="px-3 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-semibold shadow-sm transition active:scale-95 flex items-center justify-center gap-1.5">
+              <span>⚡</span> 2-Rider Race
+            </button>
+            <button id="btn-reject"
+              class="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-[var(--foreground)] border border-[var(--border)] rounded-xl font-medium transition active:scale-95">
+              Driver Rejects (Fallback)
+            </button>
+            <button id="btn-reset"
+              class="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-[var(--foreground)] border border-[var(--border)] rounded-xl font-medium transition active:scale-95">
+              Reset Drivers (40)
+            </button>
+          </div>
+        </div>
+
+        <!-- Active Trip State Machine Inspector -->
+        <div
+          class="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-4 space-y-3 shadow-sm flex-1 flex flex-col">
+          <div class="flex items-center justify-between">
+            <h2 class="font-semibold text-sm flex items-center gap-2">
+              <span>🔄</span> Trip State Machine
+            </h2>
+            <span id="trip-badge"
+              class="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-zinc-800 text-zinc-400 border border-zinc-700">
+              IDLE
+            </span>
+          </div>
+
+          <!-- Stepper Visualizer -->
+          <div class="grid grid-cols-5 gap-1 py-1">
+            <div id="step-requested" class="h-1.5 rounded-full bg-zinc-800 transition-colors"></div>
+            <div id="step-matching" class="h-1.5 rounded-full bg-zinc-800 transition-colors"></div>
+            <div id="step-matched" class="h-1.5 rounded-full bg-zinc-800 transition-colors"></div>
+            <div id="step-enroute" class="h-1.5 rounded-full bg-zinc-800 transition-colors"></div>
+            <div id="step-completed" class="h-1.5 rounded-full bg-zinc-800 transition-colors"></div>
+          </div>
+
+          <!-- Trip Details -->
+          <div class="space-y-2 text-xs bg-[var(--background)] p-3 rounded-xl border border-[var(--border)]">
+            <div class="flex justify-between">
+              <span class="text-[var(--muted-foreground)]">Trip ID:</span>
+              <span id="trip-id" class="font-mono font-medium text-[var(--foreground)]">-</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-[var(--muted-foreground)]">Matched Driver:</span>
+              <span id="trip-driver" class="font-mono font-bold text-amber-400">None</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-[var(--muted-foreground)]">Distance to Pickup:</span>
+              <span id="trip-distance" class="font-medium text-cyan-400">-</span>
+            </div>
+            <div class="space-y-1 pt-1">
+              <div class="flex justify-between text-[11px]">
+                <span class="text-[var(--muted-foreground)]">15s Offer Lease Lock:</span>
+                <span id="lock-timer" class="font-mono text-amber-400 font-bold">15.0s</span>
+              </div>
+              <div class="w-full bg-zinc-800 h-1.5 rounded-full overflow-hidden">
+                <div id="lock-progress" class="bg-amber-400 h-full w-0 transition-all duration-100"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Audit Event Stream -->
+          <div class="space-y-1.5 flex-1 flex flex-col pt-1">
+            <span class="text-[11px] font-semibold text-[var(--muted-foreground)] uppercase tracking-wider">Live Audit
+              Event Log</span>
+            <div id="audit-log"
+              class="flex-1 min-h-[140px] max-h-[160px] overflow-y-auto bg-[var(--background)] rounded-xl p-2 font-mono text-[11px] space-y-1 border border-[var(--border)] text-zinc-400">
+              <div class="text-zinc-600">[System] Visualizer initialized.</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // --- SAN FRANCISCO SPATIAL BOUNDS ---
+    const SF_BOUNDS = {
+      minLat: 37.7081, maxLat: 37.8324,
+      minLng: -122.5270, maxLng: -122.3482
+    };
+
+    const canvas = document.getElementById('sim-canvas');
+    const ctx = canvas.getContext('2d');
+
+    function toScreen(lat, lng) {
+      const x = ((lng - SF_BOUNDS.minLng) / (SF_BOUNDS.maxLng - SF_BOUNDS.minLng)) * canvas.width;
+      const y = canvas.height - (((lat - SF_BOUNDS.minLat) / (SF_BOUNDS.maxLat - SF_BOUNDS.minLat)) * canvas.height);
+      return { x, y };
+    }
+
+    function toGeo(x, y) {
+      const lng = SF_BOUNDS.minLng + (x / canvas.width) * (SF_BOUNDS.maxLng - SF_BOUNDS.minLng);
+      const lat = SF_BOUNDS.minLat + ((canvas.height - y) / canvas.height) * (SF_BOUNDS.maxLat - SF_BOUNDS.minLat);
+      return { lat, lng };
+    }
+
+    // --- SPATIAL QUADTREE ---
+    class QuadTreeNode {
+      constructor(bounds, depth = 0) {
+        this.bounds = bounds;
+        this.depth = depth;
+        this.points = [];
+        this.isDivided = false;
+        this.nw = this.ne = this.sw = this.se = null;
+      }
+      subdivide() {
+        const midLat = (this.bounds.minLat + this.bounds.maxLat) / 2;
+        const midLng = (this.bounds.minLng + this.bounds.maxLng) / 2;
+        this.nw = new QuadTreeNode({ minLat: midLat, maxLat: this.bounds.maxLat, minLng: this.bounds.minLng, maxLng: midLng }, this.depth + 1);
+        this.ne = new QuadTreeNode({ minLat: midLat, maxLat: this.bounds.maxLat, minLng: midLng, maxLng: this.bounds.maxLng }, this.depth + 1);
+        this.sw = new QuadTreeNode({ minLat: this.bounds.minLat, maxLat: midLat, minLng: this.bounds.minLng, maxLng: midLng }, this.depth + 1);
+        this.se = new QuadTreeNode({ minLat: this.bounds.minLat, maxLat: midLat, minLng: midLng, maxLng: this.bounds.maxLng }, this.depth + 1);
+        this.isDivided = true;
+      }
+      insert(driver) {
+        if (!this.contains(driver.lat, driver.lng)) return false;
+        if (!this.isDivided) {
+          if (this.points.length < 4 || this.depth >= 6) {
+            this.points.push(driver);
+            return true;
+          }
+          this.subdivide();
+          const existing = this.points;
+          this.points = [];
+          for (const p of existing) this.insertIntoChild(p);
+        }
+        return this.insertIntoChild(driver);
+      }
+      insertIntoChild(d) {
+        return this.nw.insert(d) || this.ne.insert(d) || this.sw.insert(d) || this.se.insert(d);
+      }
+      contains(lat, lng) {
+        return lat >= this.bounds.minLat && lat <= this.bounds.maxLat &&
+          lng >= this.bounds.minLng && lng <= this.bounds.maxLng;
+      }
+    }
+
+    let drivers = [];
+    let rider = { lat: 37.7749, lng: -122.4194, name: "Alice" };
+    let activeTrip = null;
+    let quadTreeRoot = null;
+    let searchRadiusAnim = 0;
+    let offerInterval = null;
+
+    // --- WEBSOCKET LIVE BACKEND CONNECTION ---
+    let socket = null;
+    let isLiveBackend = false;
+
+    function initWebSocket() {
+      const host = window.location.host || "localhost:3000";
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const wsUrl = `${protocol}//${host}/ws?role=observer`;
+
+      const badge = document.getElementById('ws-badge');
+
+      try {
+        socket = new WebSocket(wsUrl);
+
+        socket.onopen = () => {
+          isLiveBackend = true;
+          badge.className = 'px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1.5';
+          badge.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span> Live Backend Connected';
+          log(`Connected to Fastify backend stream at ${wsUrl}`, 'text-emerald-400');
+        };
+
+        socket.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            handleBackendMessage(msg);
+          } catch (err) { }
+        };
+
+        socket.onclose = () => {
+          if (isLiveBackend) {
+            log(`Disconnected from backend. Falling back to local mode...`, 'text-amber-400');
+          }
+          isLiveBackend = false;
+          badge.className = 'px-2 py-0.5 rounded-full text-[10px] font-bold bg-zinc-800 text-zinc-400 border border-zinc-700 flex items-center gap-1.5';
+          badge.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-zinc-500"></span> Standalone Offline Mode';
+          setTimeout(initWebSocket, 3000);
+        };
+
+        socket.onerror = () => {
+          socket.close();
+        };
+      } catch (e) {
+        // Run standalone if cannot connect
+      }
+    }
+
+    function handleBackendMessage(msg) {
+      if (msg.type === "telemetry_batch") {
+        for (const item of msg.drivers) {
+          let d = drivers.find(drv => drv.id === item.id);
+          if (!d) {
+            drivers.push(item);
+          } else {
+            d.lat = item.lat;
+            d.lng = item.lng;
+            d.status = item.status;
+          }
+        }
+        rebuildQuadTree();
+      } else if (msg.type === "telemetry_update") {
+        let d = drivers.find(drv => drv.id === msg.driverId);
+        if (!d) {
+          d = { id: msg.driverId, lat: msg.lat, lng: msg.lng, status: msg.status };
+          drivers.push(d);
+        } else {
+          d.lat = msg.lat;
+          d.lng = msg.lng;
+          d.status = msg.status;
+        }
+        rebuildQuadTree();
+      } else if (msg.type === "offer_dispatched") {
+        document.getElementById('trip-driver').textContent = msg.driverId;
+        document.getElementById('trip-distance').textContent = `${(msg.distanceMeters / 1000).toFixed(2)} km`;
+        log(`[Backend Dispatch] Atomic lock leased on ${msg.driverId}. 15s countdown...`, 'text-amber-400');
+        startLockCountdown();
+      } else if (msg.type === "trip_matched") {
+        updateSteps('matched');
+        log(`[Backend State] Trip ${msg.tripId} MATCHED with ${msg.driverId}!`, 'text-emerald-400');
+      } else if (msg.type === "trip_event") {
+        updateSteps(msg.status);
+        log(`[Backend Transition] Status -> [${msg.status}]`, 'text-cyan-400');
+      } else if (msg.type === "offer_revoked") {
+        log(`[Backend Event] Offer revoked on ${msg.driverId}: ${msg.reason}`, 'text-rose-400');
+      }
+    }
+
+    function resetDrivers(count = 40) {
+      drivers = [];
+      for (let i = 1; i <= count; i++) {
+        drivers.push({
+          id: `sim_driver_${i}`,
+          lat: SF_BOUNDS.minLat + Math.random() * (SF_BOUNDS.maxLat - SF_BOUNDS.minLat),
+          lng: SF_BOUNDS.minLng + Math.random() * (SF_BOUNDS.maxLng - SF_BOUNDS.minLng),
+          vx: (Math.random() - 0.5) * 0.00015,
+          vy: (Math.random() - 0.5) * 0.00015,
+          status: 'available',
+        });
+      }
+      rebuildQuadTree();
+      log(`Initialized ${count} drivers.`);
+    }
+
+    function rebuildQuadTree() {
+      quadTreeRoot = new QuadTreeNode(SF_BOUNDS);
+      let count = 0;
+      for (const d of drivers) {
+        if (d.status === 'available') {
+          quadTreeRoot.insert(d);
+          count++;
+        }
+      }
+      document.getElementById('stat-available').textContent = count;
+      document.getElementById('stat-busy').textContent = drivers.length - count;
+      document.getElementById('stat-nodes').textContent = countNodes(quadTreeRoot);
+    }
+
+    function countNodes(node) {
+      if (!node) return 0;
+      if (!node.isDivided) return 1;
+      return 1 + countNodes(node.nw) + countNodes(node.ne) + countNodes(node.sw) + countNodes(node.se);
+    }
+
+    function haversine(lat1, lon1, lat2, lon2) {
+      const R = 6371;
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }
+
+    function findNearest(lat, lng, k = 3) {
+      const t0 = performance.now();
+      const avail = drivers.filter(d => d.status === 'available');
+      avail.sort((a, b) => haversine(lat, lng, a.lat, a.lng) - haversine(lat, lng, b.lat, b.lng));
+      const dur = (performance.now() - t0).toFixed(2);
+      document.getElementById('stat-latency').textContent = `${dur} ms`;
+      return avail.slice(0, k);
+    }
+
+    function log(msg, color = 'text-zinc-400') {
+      const el = document.getElementById('audit-log');
+      const time = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const row = document.createElement('div');
+      row.className = color;
+      row.innerHTML = `<span class="text-zinc-600">[${time}]</span> ${msg}`;
+      el.appendChild(row);
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function updateSteps(status) {
+      const badge = document.getElementById('trip-badge');
+      badge.textContent = status.toUpperCase();
+      const steps = ['requested', 'matching', 'matched', 'enroute', 'completed'];
+      steps.forEach(s => document.getElementById(`step-${s}`).className = 'h-1.5 rounded-full bg-zinc-800 transition-colors');
+
+      if (status === 'requested') {
+        document.getElementById('step-requested').className = 'h-1.5 rounded-full bg-cyan-400';
+        badge.className = 'px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-cyan-500/20 text-cyan-400 border border-cyan-500/30';
+      } else if (status === 'matching') {
+        document.getElementById('step-requested').className = 'h-1.5 rounded-full bg-cyan-400';
+        document.getElementById('step-matching').className = 'h-1.5 rounded-full bg-amber-400 animate-pulse';
+        badge.className = 'px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30';
+      } else if (status === 'matched') {
+        document.getElementById('step-requested').className = 'h-1.5 rounded-full bg-cyan-400';
+        document.getElementById('step-matching').className = 'h-1.5 rounded-full bg-cyan-400';
+        document.getElementById('step-matched').className = 'h-1.5 rounded-full bg-emerald-400';
+        badge.className = 'px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30';
+      } else if (status === 'en_route') {
+        document.getElementById('step-requested').className = 'h-1.5 rounded-full bg-cyan-400';
+        document.getElementById('step-matching').className = 'h-1.5 rounded-full bg-cyan-400';
+        document.getElementById('step-matched').className = 'h-1.5 rounded-full bg-cyan-400';
+        document.getElementById('step-enroute').className = 'h-1.5 rounded-full bg-blue-400 animate-pulse';
+        badge.className = 'px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-blue-500/20 text-blue-400 border border-blue-500/30';
+      } else if (status === 'completed') {
+        steps.forEach(s => document.getElementById(`step-${s}`).className = 'h-1.5 rounded-full bg-emerald-400');
+        badge.className = 'px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30';
+      }
+    }
+
+    function startRideRequest() {
+      const tripId = `trip_${Date.now().toString().slice(-4)}`;
+      document.getElementById('trip-id').textContent = tripId;
+      document.getElementById('trip-driver').textContent = 'Searching...';
+      updateSteps('requested');
+      searchRadiusAnim = 20;
+
+      // If connected to live backend WebSocket, send request to server!
+      if (isLiveBackend && socket && socket.readyState === WebSocket.OPEN) {
+        log(`[WebSocket] Sending ride_request to Fastify backend...`, 'text-emerald-400');
+        socket.send(JSON.stringify({
+          type: "ride_request",
+          requestId: `req_${Date.now()}`,
+          pickup: { lat: rider.lat, lng: rider.lng },
+          dropoff: { lat: rider.lat + 0.015, lng: rider.lng + 0.015 },
+          offerTimeoutMs: 15000
+        }));
+        return;
+      }
+
+      // Standalone simulation fallback
+      activeTrip = { id: tripId, rider: 'Alice', pickup: { ...rider }, status: 'requested', driver: null, candidates: [] };
+      setTimeout(() => {
+        activeTrip.status = 'matching';
+        updateSteps('matching');
+        const nearest = findNearest(rider.lat, rider.lng, 3);
+        if (nearest.length === 0) return;
+        activeTrip.candidates = nearest;
+        dispatchOfferToCandidate(0);
+      }, 500);
+    }
+
+    function dispatchOfferToCandidate(index) {
+      if (index >= activeTrip.candidates.length) return;
+      const candidate = activeTrip.candidates[index];
+      candidate.status = 'locked';
+      activeTrip.driver = candidate;
+      rebuildQuadTree();
+
+      const dist = haversine(rider.lat, rider.lng, candidate.lat, candidate.lng).toFixed(2);
+      document.getElementById('trip-driver').textContent = candidate.id;
+      document.getElementById('trip-distance').textContent = `${dist} km`;
+      startLockCountdown(() => {
+        activeTrip.status = 'matched';
+        candidate.status = 'en_route';
+        updateSteps('matched');
+        rebuildQuadTree();
+        setTimeout(() => {
+          activeTrip.status = 'en_route';
+          updateSteps('en_route');
+        }, 1200);
+      });
+    }
+
+    function startLockCountdown(onAccepted) {
+      clearInterval(offerInterval);
+      let timeLeft = 15;
+      const timerEl = document.getElementById('lock-timer');
+      const progEl = document.getElementById('lock-progress');
+
+      offerInterval = setInterval(() => {
+        timeLeft -= 0.1;
+        timerEl.textContent = `${Math.max(0, timeLeft).toFixed(1)}s`;
+        progEl.style.width = `${(timeLeft / 15) * 100}%`;
+
+        if (timeLeft <= 12.5 && onAccepted) {
+          clearInterval(offerInterval);
+          progEl.style.width = '0%';
+          timerEl.textContent = 'ACCEPTED';
+          onAccepted();
+        } else if (timeLeft <= 0) {
+          clearInterval(offerInterval);
+          if (activeTrip && activeTrip.driver) {
+            activeTrip.driver.status = 'available';
+            rebuildQuadTree();
+            dispatchOfferToCandidate(1);
+          }
+        }
+      }, 100);
+    }
+
+    canvas.addEventListener('click', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+      const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+      rider = toGeo(x, y);
+      log(`Rider moved to (${rider.lat.toFixed(4)}, ${rider.lng.toFixed(4)})`);
+    });
+
+    document.getElementById('btn-request').onclick = startRideRequest;
+    document.getElementById('btn-reset').onclick = () => resetDrivers(40);
+    document.getElementById('btn-race').onclick = () => {
+      log(`Simulating concurrent race...`, 'text-indigo-400');
+      startRideRequest();
+    };
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      if (document.getElementById('toggle-grid').checked && quadTreeRoot) {
+        drawNode(quadTreeRoot);
+      }
+
+      // If standalone (no backend), wander locally
+      const move = !isLiveBackend && document.getElementById('toggle-traffic').checked;
+      for (const d of drivers) {
+        if (move && d.status === 'available') {
+          d.lat += d.vy || 0;
+          d.lng += d.vx || 0;
+          if (d.lat < SF_BOUNDS.minLat || d.lat > SF_BOUNDS.maxLat) d.vy *= -1;
+          if (d.lng < SF_BOUNDS.minLng || d.lng > SF_BOUNDS.maxLng) d.vx *= -1;
+        }
+
+        const pos = toScreen(d.lat, d.lng);
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, d.status === 'locked' ? 6 : 4, 0, Math.PI * 2);
+        if (d.status === 'available') ctx.fillStyle = '#34d399';
+        else if (d.status === 'locked') ctx.fillStyle = '#fbbf24';
+        else if (d.status === 'en_route') ctx.fillStyle = '#60a5fa';
+        else ctx.fillStyle = '#f87171';
+        ctx.fill();
+
+        if (d.status === 'locked') {
+          ctx.strokeStyle = '#fbbf24';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+      }
+
+      // Draw Rider Pickup
+      const rPos = toScreen(rider.lat, rider.lng);
+      ctx.beginPath();
+      ctx.arc(rPos.x, rPos.y, 8, 0, Math.PI * 2);
+      ctx.fillStyle = '#c084fc';
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '10px monospace';
+      ctx.fillText('Alice', rPos.x - 12, rPos.y - 12);
+
+      if (searchRadiusAnim > 0) {
+        ctx.beginPath();
+        ctx.arc(rPos.x, rPos.y, searchRadiusAnim, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(34, 211, 238, 0.6)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        searchRadiusAnim += 4;
+        if (searchRadiusAnim > 120) searchRadiusAnim = 0;
+      }
+
+      requestAnimationFrame(draw);
+    }
+
+    function drawNode(node) {
+      if (!node) return;
+      const tl = toScreen(node.bounds.maxLat, node.bounds.minLng);
+      const br = toScreen(node.bounds.minLat, node.bounds.maxLng);
+
+      ctx.strokeStyle = 'rgba(6, 182, 212, 0.15)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+
+      if (node.isDivided) {
+        drawNode(node.nw);
+        drawNode(node.ne);
+        drawNode(node.sw);
+        drawNode(node.se);
+      }
+    }
+
+    resetDrivers(40);
+    initWebSocket();
+    requestAnimationFrame(draw);
+  </script>
+</body>
+
+</html>

@@ -1,4 +1,5 @@
 import pkg from "./spatial_hash_grid.js";
+
 const { SpatialHashGrid, haversineDistance } = pkg;
 
 const SF_BOUNDS = {
@@ -8,131 +9,364 @@ const SF_BOUNDS = {
   maxLng: -122.3482,
 };
 
+const WARMUP_QUERIES = 1000;
+
+const TEST_QUERIES = 10000;
+
+const K_VALUES = [1, 4, 10, 20];
+
+const DRIVER_COUNTS = [1000, 5000, 10000, 25000, 50000, 100000];
+
+const CELL_SIZES = [100, 250, 500, 1000, 2000];
+
 function randomInRange(min, max) {
   return min + Math.random() * (max - min);
 }
 
-console.log("=====================================================");
-console.log("   SPATIAL HASH GRID: BENCHMARK & CORRECTNESS TEST   ");
-console.log("=====================================================\n");
+function randomDriver(i) {
+  return {
+    id: `driver_${i}`,
 
-const NUM_DRIVERS = 5000;
-const grid = new SpatialHashGrid(SF_BOUNDS, 500);
-const drivers = [];
+    lat: randomInRange(SF_BOUNDS.minLat, SF_BOUNDS.maxLat),
 
-console.log(
-  `[1] Seeding ${NUM_DRIVERS} simulated drivers into San Francisco bounds...`,
-);
-const tSeedStart = performance.now();
-for (let i = 0; i < NUM_DRIVERS; i++) {
-  const id = `driver_${i}`;
-  const lat = randomInRange(SF_BOUNDS.minLat, SF_BOUNDS.maxLat);
-  const lng = randomInRange(SF_BOUNDS.minLng, SF_BOUNDS.maxLng);
-  drivers.push({ id, lat, lng });
-  grid.insert(id, lat, lng);
+    lng: randomInRange(SF_BOUNDS.minLng, SF_BOUNDS.maxLng),
+  };
 }
-const tSeedEnd = performance.now();
-console.log(
-  `    Seeding completed in ${(tSeedEnd - tSeedStart).toFixed(2)}ms (${(((tSeedEnd - tSeedStart) / NUM_DRIVERS) * 1000).toFixed(2)} µs/insert)\n`,
-);
 
-// 1. Correctness Test
-console.log(
-  "[2] Running Accuracy Verification (500 queries vs Brute-Force Haversine)...",
-);
-let discrepancies = 0;
-let duplicateCount = 0;
-const TEST_QUERIES = 500;
-const k = 4;
+function percentile(sortedValues, p) {
+  return sortedValues[
+    Math.min(sortedValues.length - 1, Math.floor(sortedValues.length * p))
+  ];
+}
 
-for (let q = 0; q < TEST_QUERIES; q++) {
-  const qLat = randomInRange(SF_BOUNDS.minLat, SF_BOUNDS.maxLat);
-  const qLng = randomInRange(SF_BOUNDS.minLng, SF_BOUNDS.maxLng);
+function formatUs(ms) {
+  return `${(ms * 1000).toFixed(2)} µs`;
+}
 
-  const allDists = drivers.map((d) => ({
-    id: d.id,
-    distance: haversineDistance(qLat, qLng, d.lat, d.lng),
-  }));
-  allDists.sort((a, b) => a.distance - b.distance);
-  const expectedK = allDists.slice(0, k);
+function createGridWithDrivers(driverCount, cellSize) {
+  const grid = new SpatialHashGrid(SF_BOUNDS, cellSize);
 
-  const actualK = grid.kNearestNeighbors(qLat, qLng, k, 15000);
+  const drivers = new Array(driverCount);
 
-  const ids = actualK.map((x) => x.id);
-  if (new Set(ids).size !== ids.length) {
-    duplicateCount++;
+  for (let i = 0; i < driverCount; i++) {
+    const driver = randomDriver(i);
+
+    drivers[i] = driver;
+
+    grid.insert(driver.id, driver.lat, driver.lng);
   }
 
-  for (let i = 0; i < k; i++) {
-    if (
-      !actualK[i] ||
-      Math.abs(actualK[i].distance - expectedK[i].distance) > 0.5
-    ) {
+  return {
+    grid,
+    drivers,
+  };
+}
+
+function bruteForceKNN(drivers, qLat, qLng, k) {
+  return drivers
+    .map((driver) => ({
+      id: driver.id,
+
+      distance: haversineDistance(qLat, qLng, driver.lat, driver.lng),
+    }))
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, k);
+}
+
+function sameNearestSet(actual, expected, toleranceMeters = 0.5) {
+  if (actual.length !== expected.length) {
+    return false;
+  }
+
+  const actualIds = new Set(actual.map((x) => x.id));
+
+  const expectedIds = new Set(expected.map((x) => x.id));
+
+  // Duplicate detection.
+  if (actualIds.size !== actual.length) {
+    return false;
+  }
+
+  // Same IDs.
+  for (const id of expectedIds) {
+    if (!actualIds.has(id)) {
+      return false;
+    }
+  }
+
+  // Same ordering/distances.
+  for (let i = 0; i < expected.length; i++) {
+    if (Math.abs(actual[i].distance - expected[i].distance) > toleranceMeters) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function benchmarkQueries(grid, count, k, maxRadiusMeters = 15000) {
+  // Warm up V8/JIT.
+  for (let i = 0; i < WARMUP_QUERIES; i++) {
+    grid.kNearestNeighbors(
+      randomInRange(SF_BOUNDS.minLat, SF_BOUNDS.maxLat),
+
+      randomInRange(SF_BOUNDS.minLng, SF_BOUNDS.maxLng),
+
+      k,
+      maxRadiusMeters,
+    );
+  }
+
+  const latencies = new Array(count);
+
+  const start = process.hrtime.bigint();
+
+  for (let i = 0; i < count; i++) {
+    const qLat = randomInRange(SF_BOUNDS.minLat, SF_BOUNDS.maxLat);
+
+    const qLng = randomInRange(SF_BOUNDS.minLng, SF_BOUNDS.maxLng);
+
+    const t0 = process.hrtime.bigint();
+
+    grid.kNearestNeighbors(qLat, qLng, k, maxRadiusMeters);
+
+    const t1 = process.hrtime.bigint();
+
+    latencies[i] = Number(t1 - t0) / 1e6;
+  }
+
+  const end = process.hrtime.bigint();
+
+  const durationMs = Number(end - start) / 1e6;
+
+  latencies.sort((a, b) => a - b);
+
+  return {
+    durationMs,
+
+    p50: percentile(latencies, 0.5),
+
+    p95: percentile(latencies, 0.95),
+
+    p99: percentile(latencies, 0.99),
+
+    max: latencies[latencies.length - 1],
+
+    throughput: count / (durationMs / 1000),
+  };
+}
+
+console.log("=====================================================");
+
+console.log("   SPATIAL HASH GRID: STRESS / CORRECTNESS SUITE    ");
+
+console.log("=====================================================\n");
+
+/*
+========================================================
+1. ADVERSARIAL CORRECTNESS
+========================================================
+*/
+
+console.log("[1] Adversarial correctness test");
+
+const { grid: correctnessGrid, drivers: correctnessDrivers } =
+  createGridWithDrivers(5000, 500);
+
+let discrepancies = 0;
+
+let duplicates = 0;
+
+const queryPoints = [];
+
+// Random queries.
+for (let i = 0; i < 8000; i++) {
+  queryPoints.push({
+    lat: randomInRange(SF_BOUNDS.minLat, SF_BOUNDS.maxLat),
+
+    lng: randomInRange(SF_BOUNDS.minLng, SF_BOUNDS.maxLng),
+  });
+}
+
+// Explicit boundary queries.
+const boundaryEpsilon = 1e-8;
+
+for (const lat of [
+  SF_BOUNDS.minLat,
+  SF_BOUNDS.maxLat,
+
+  (SF_BOUNDS.minLat + SF_BOUNDS.maxLat) / 2,
+]) {
+  for (const lng of [
+    SF_BOUNDS.minLng,
+    SF_BOUNDS.maxLng,
+
+    (SF_BOUNDS.minLng + SF_BOUNDS.maxLng) / 2,
+  ]) {
+    queryPoints.push({
+      lat,
+      lng,
+    });
+
+    queryPoints.push({
+      lat: Math.min(SF_BOUNDS.maxLat, lat + boundaryEpsilon),
+
+      lng: Math.min(SF_BOUNDS.maxLng, lng + boundaryEpsilon),
+    });
+  }
+}
+
+for (const k of K_VALUES) {
+  for (const point of queryPoints) {
+    const expected = bruteForceKNN(correctnessDrivers, point.lat, point.lng, k);
+
+    const actual = correctnessGrid.kNearestNeighbors(
+      point.lat,
+      point.lng,
+      k,
+      15000,
+    );
+
+    const ids = actual.map((x) => x.id);
+
+    if (new Set(ids).size !== ids.length) {
+      duplicates++;
+    }
+
+    if (!sameNearestSet(actual, expected)) {
       discrepancies++;
-      break;
+
+      if (discrepancies <= 5) {
+        console.log(
+          `    First discrepancy: k=${k}, lat=${point.lat}, lng=${point.lng}`,
+        );
+      }
     }
   }
 }
-console.log(`    Discrepancies: ${discrepancies} / ${TEST_QUERIES}`);
-console.log(`    Duplicate IDs returned: ${duplicateCount}`);
+
+console.log(`    Queries checked: ${queryPoints.length * K_VALUES.length}`);
+
+console.log(`    Discrepancies: ${discrepancies}`);
+
+console.log(`    Duplicate IDs: ${duplicates}`);
+
+console.log(`    Accuracy: ${discrepancies === 0 ? "100.0%" : "FAILED"}\n`);
+
+/*
+========================================================
+2. SCALING BENCHMARK
+========================================================
+*/
+
+console.log("[2] Scaling benchmark (k=4, 5,000 queries)");
+
+console.log("\nDrivers       p50        p95        p99        max        QPS");
+
 console.log(
-  `    Accuracy: ${(((TEST_QUERIES - discrepancies) / TEST_QUERIES) * 100).toFixed(1)}%\n`,
+  "------------------------------------------------------------------",
 );
 
-// 2. Telemetry Updates Benchmark
-console.log("[3] Benchmarking Real-Time Telemetry Updates (50,000 updates)...");
-const UPDATE_COUNT = 50000;
-const startUpdate = performance.now();
+for (const driverCount of DRIVER_COUNTS) {
+  const { grid } = createGridWithDrivers(driverCount, 500);
+
+  const result = benchmarkQueries(grid, 5000, 4, 15000);
+
+  console.log(
+    `${String(driverCount).padEnd(13)}` +
+      `${formatUs(result.p50).padEnd(11)}` +
+      `${formatUs(result.p95).padEnd(11)}` +
+      `${formatUs(result.p99).padEnd(11)}` +
+      `${formatUs(result.max).padEnd(11)}` +
+      `${Math.round(result.throughput).toLocaleString()}`,
+  );
+}
+
+/*
+========================================================
+3. CELL SIZE BENCHMARK
+========================================================
+*/
+
+console.log("\n[3] Cell-size benchmark (5,000 drivers, k=4)");
+
+console.log("\nCell Size     p50        p95        p99        max        QPS");
+
+console.log(
+  "------------------------------------------------------------------",
+);
+
+for (const cellSize of CELL_SIZES) {
+  const { grid } = createGridWithDrivers(5000, cellSize);
+
+  const result = benchmarkQueries(grid, 5000, 4, 15000);
+
+  console.log(
+    `${String(`${cellSize}m`).padEnd(13)}` +
+      `${formatUs(result.p50).padEnd(11)}` +
+      `${formatUs(result.p95).padEnd(11)}` +
+      `${formatUs(result.p99).padEnd(11)}` +
+      `${formatUs(result.max).padEnd(11)}` +
+      `${Math.round(result.throughput).toLocaleString()}`,
+  );
+}
+
+/*
+========================================================
+4. TELEMETRY BENCHMARK
+========================================================
+*/
+
+console.log("\n[4] Telemetry update benchmark");
+
+const { grid: telemetryGrid, drivers: telemetryDrivers } =
+  createGridWithDrivers(5000, 500);
+
+const UPDATE_COUNT = 100000;
+
+// Warmup.
+for (let i = 0; i < 10000; i++) {
+  const driver = telemetryDrivers[i % telemetryDrivers.length];
+
+  telemetryGrid.update(driver.id, driver.lat, driver.lng);
+}
+
+const updateStart = process.hrtime.bigint();
+
 for (let i = 0; i < UPDATE_COUNT; i++) {
-  const d = drivers[i % NUM_DRIVERS];
-  d.lat = Math.max(
+  const driver = telemetryDrivers[i % telemetryDrivers.length];
+
+  driver.lat = Math.max(
     SF_BOUNDS.minLat,
-    Math.min(SF_BOUNDS.maxLat, d.lat + (Math.random() - 0.5) * 0.0002),
+    Math.min(SF_BOUNDS.maxLat, driver.lat + (Math.random() - 0.5) * 0.0002),
   );
-  d.lng = Math.max(
+
+  driver.lng = Math.max(
     SF_BOUNDS.minLng,
-    Math.min(SF_BOUNDS.maxLng, d.lng + (Math.random() - 0.5) * 0.0002),
+    Math.min(SF_BOUNDS.maxLng, driver.lng + (Math.random() - 0.5) * 0.0002),
   );
-  grid.update(d.id, d.lat, d.lng);
+
+  telemetryGrid.update(driver.id, driver.lat, driver.lng);
 }
-const endUpdate = performance.now();
-const updateDurationMs = endUpdate - startUpdate;
+
+const updateEnd = process.hrtime.bigint();
+
+const updateDurationMs = Number(updateEnd - updateStart) / 1e6;
+
+console.log(`    Updates: ${UPDATE_COUNT.toLocaleString()}`);
+
 console.log(`    Duration: ${updateDurationMs.toFixed(2)}ms`);
+
+console.log(`    Mean latency: ${formatUs(updateDurationMs / UPDATE_COUNT)}`);
+
 console.log(
-  `    Mean Latency: ${((updateDurationMs / UPDATE_COUNT) * 1000).toFixed(2)} µs per update`,
-);
-console.log(
-  `    Throughput: ${(UPDATE_COUNT / (updateDurationMs / 1000)).toLocaleString("en-US", { maximumFractionDigits: 0 })} updates/second\n`,
+  `    Throughput: ${Math.round(
+    UPDATE_COUNT / (updateDurationMs / 1000),
+  ).toLocaleString()} updates/sec`,
 );
 
-// 3. k-NN Search Benchmark
-console.log("[4] Benchmarking k-NN Matching Queries (5,000 queries, k=4)...");
-const QUERY_COUNT = 5000;
-const latencies = [];
-const startQuery = performance.now();
-for (let i = 0; i < QUERY_COUNT; i++) {
-  const qLat = randomInRange(SF_BOUNDS.minLat, SF_BOUNDS.maxLat);
-  const qLng = randomInRange(SF_BOUNDS.minLng, SF_BOUNDS.maxLng);
-  const t0 = performance.now();
-  grid.kNearestNeighbors(qLat, qLng, 4, 10000);
-  const t1 = performance.now();
-  latencies.push(t1 - t0);
-}
-const endQuery = performance.now();
-const queryDurationMs = endQuery - startQuery;
+console.log("\n=====================================================");
 
-latencies.sort((a, b) => a - b);
-const p50 = latencies[Math.floor(QUERY_COUNT * 0.5)];
-const p95 = latencies[Math.floor(QUERY_COUNT * 0.95)];
-const p99 = latencies[Math.floor(QUERY_COUNT * 0.99)];
-const max = latencies[QUERY_COUNT - 1];
+console.log("                    TEST COMPLETE                   ");
 
-console.log(`    Duration: ${queryDurationMs.toFixed(2)}ms`);
-console.log(`    p50 Latency: ${(p50 * 1000).toFixed(1)} µs`);
-console.log(`    p95 Latency: ${(p95 * 1000).toFixed(1)} µs`);
-console.log(`    p99 Latency: ${(p99 * 1000).toFixed(1)} µs`);
-console.log(`    Max Latency: ${(max * 1000).toFixed(1)} µs`);
-console.log(
-  `    Throughput: ${(QUERY_COUNT / (queryDurationMs / 1000)).toLocaleString("en-US", { maximumFractionDigits: 0 })} queries/second\n`,
-);
 console.log("=====================================================");
