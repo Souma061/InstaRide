@@ -19,7 +19,11 @@ export interface OfferNotification {
 
 export interface MatchingServiceEvents {
   onOfferDispatched?: (notification: OfferNotification) => void;
-  onOfferRevoked?: (driverId: string, requestId: string, reason: string) => void;
+  onOfferRevoked?: (
+    driverId: string,
+    requestId: string,
+    reason: string,
+  ) => void;
   onTripMatched?: (trip: Trip, driverId: string) => void;
   onMatchFailed?: (requestId: string, reason: string) => void;
 }
@@ -39,7 +43,9 @@ interface PendingOffer {
   requestId: string;
   expiresAt: number;
   timer: NodeJS.Timeout;
-  resolve: (response: "accepted" | "rejected" | "timed_out" | "cancelled") => void;
+  resolve: (
+    response: "accepted" | "rejected" | "timed_out" | "cancelled",
+  ) => void;
 }
 
 export class MatchingService {
@@ -103,7 +109,10 @@ export class MatchingService {
       maxRadiusMeters: params.maxRadiusMeters ?? 10_000,
       offerTimeoutMs: params.offerTimeoutMs ?? 15_000,
     }).catch((err) => {
-      console.error(`[MatchingService] Error in offer loop for ${trip.id}:`, err);
+      console.error(
+        `[MatchingService] Error in offer loop for ${trip.id}:`,
+        err,
+      );
     });
 
     return { success: true, trip };
@@ -177,7 +186,16 @@ export class MatchingService {
 
     const trip = this.stateMachine.getTripByRequestId(requestId);
     if (trip) {
-      return this.stateMachine.cancelTrip(trip.id, cancelledBy, reason);
+      const assignedDriverId = trip.driverId;
+      const cancelRes = this.stateMachine.cancelTrip(
+        trip.id,
+        cancelledBy,
+        reason,
+      );
+      if (cancelRes.success && assignedDriverId) {
+        this.driverRegistry.completeTrip(assignedDriverId);
+      }
+      return cancelRes;
     }
 
     return { success: true };
@@ -208,7 +226,10 @@ export class MatchingService {
       maxRadiusMeters: options?.maxRadiusMeters ?? 10_000,
       offerTimeoutMs: options?.offerTimeoutMs ?? 15_000,
     }).catch((err) => {
-      console.error(`[MatchingService] Error in rematch loop for ${tripId}:`, err);
+      console.error(
+        `[MatchingService] Error in rematch loop for ${tripId}:`,
+        err,
+      );
     });
 
     return { success: true };
@@ -272,6 +293,13 @@ export class MatchingService {
         trip,
         config.offerTimeoutMs,
       );
+      if (
+        this.abortedRequests.has(trip.requestId) ||
+        trip.status !== "matching"
+      ) {
+        this.driverRegistry.releaseLock(candidate.id, trip.requestId);
+        return;
+      }
 
       if (outcome === "accepted") {
         // Atomic CAS commit
@@ -281,15 +309,20 @@ export class MatchingService {
         );
 
         if (committed) {
-          const matchResult = this.stateMachine.setMatched(trip.id, candidate.id);
+          const matchResult = this.stateMachine.setMatched(
+            trip.id,
+            candidate.id,
+          );
           if (matchResult.success && matchResult.trip) {
             this.events.onTripMatched?.(matchResult.trip, candidate.id);
             return; // Successful match!
           }
+          // If setMatched failed (e.g. race condition), rollback the committed driver back to available
+          this.driverRegistry.completeTrip(candidate.id);
+        } else {
+          // Commit failed (e.g. lock expired before commit)
+          this.driverRegistry.releaseLock(candidate.id, trip.requestId);
         }
-
-        // Commit or state transition failed (rare edge condition)
-        this.driverRegistry.releaseLock(candidate.id, trip.requestId);
       } else if (outcome === "rejected" || outcome === "timed_out") {
         // Release lock so driver returns to Quadtree for other riders
         this.driverRegistry.releaseLock(candidate.id, trip.requestId);

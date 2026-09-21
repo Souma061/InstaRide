@@ -18,10 +18,15 @@ export interface DriverRecord {
 
 export class DriverRegistry {
   private readonly drivers = new Map<string, DriverRecord>();
-  private readonly spatialIndex: QuadTree;
+  private spatialIndex: QuadTree;
 
   constructor(spatialIndex: QuadTree) {
     this.spatialIndex = spatialIndex;
+  }
+
+  public reset(newSpatialIndex: QuadTree): void {
+    this.drivers.clear();
+    this.spatialIndex = newSpatialIndex;
   }
 
   // Reconnection idempotency: preserves active trip and lock status if driver is already registered

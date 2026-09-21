@@ -2,6 +2,7 @@ import { WebSocket } from "ws";
 import { DriverRegistry } from "../core/driver_registry.js";
 import { MatchingService } from "../core/matching_service.js";
 import { TripStateMachine } from "../core/trip_state_machine.js";
+import { clampTimeout, isValidGeoPoint } from "../utils/validation.js";
 
 export type ClientRole = "rider" | "driver" | "observer";
 
@@ -72,6 +73,10 @@ export class WsManager {
         this.riderSockets.delete(clientId);
       } else if (role === "driver") {
         this.driverSockets.delete(clientId);
+        const activeTrip = this.stateMachine.getActiveTripForDriver(clientId);
+        if (!activeTrip) {
+          this.driverRegistry.setStatus(clientId, "offline");
+        }
       } else {
         this.observerSockets.delete(socket);
       }
@@ -91,14 +96,25 @@ export class WsManager {
 
       // --- RIDER MESSAGES ---
       case "ride_request": {
-        const { requestId, pickup, dropoff } = msg;
-        if (!pickup || !dropoff) {
+        if (role !== "rider") {
           this.send(socket, {
             type: "error",
-            message: "Missing pickup or dropoff coordinates",
+            message: "Unauthorized: only riders can request rides",
           });
           return;
         }
+
+        const { requestId, pickup, dropoff, offerTimeoutMs } = msg;
+        if (!isValidGeoPoint(pickup) || !isValidGeoPoint(dropoff)) {
+          this.send(socket, {
+            type: "error",
+            message:
+              "Invalid coordinates: lat must be [-90, 90] and lng must be [-180, 180]",
+          });
+          return;
+        }
+
+        const safeTimeout = clampTimeout(offerTimeoutMs);
 
         this.matchingService
           .requestRide({
@@ -106,7 +122,7 @@ export class WsManager {
             riderId: clientId,
             pickup,
             dropoff,
-            offerTimeoutMs: msg.offerTimeoutMs ?? 15_000,
+            offerTimeoutMs: safeTimeout,
           })
           .then((res) => {
             if (res.success && res.trip) {
@@ -132,63 +148,135 @@ export class WsManager {
       }
 
       case "cancel_ride": {
+        if (role !== "rider") {
+          this.send(socket, {
+            type: "error",
+            message: "Unauthorized: only riders can cancel rides",
+          });
+          return;
+        }
+
         const { requestId, reason } = msg;
+        if (!requestId) {
+          this.send(socket, { type: "error", message: "Missing requestId" });
+          return;
+        }
+
+        // Verify trip ownership: rider can only cancel their own trip
+        const trip = this.stateMachine.getTripByRequestId(requestId);
+        if (!trip || trip.riderId !== clientId) {
+          this.send(socket, {
+            type: "error",
+            message: "Unauthorized: trip does not belong to this rider",
+          });
+          return;
+        }
+
         const res = this.matchingService.cancelRide(requestId, "rider", reason);
         this.send(socket, {
           type: "ride_cancelled",
           success: res.success,
           error: res.error,
         });
-        this.broadcastToObservers({
-          type: "trip_cancelled",
-          requestId,
-          cancelledBy: "rider",
-          reason,
-        });
-        break;
-      }
-
-      // --- DRIVER MESSAGES ---
-      case "driver_telemetry": {
-        const { lat, lng } = msg;
-        if (typeof lat === "number" && typeof lng === "number") {
-          this.driverRegistry.updateLocation(clientId, lat, lng);
-
-          // If driver is currently on an active trip, stream GPS to matched rider
-          const activeTrip = this.stateMachine.getActiveTripForDriver(clientId);
-          if (
-            activeTrip &&
-            (activeTrip.status === "en_route" ||
-              activeTrip.status === "in_progress")
-          ) {
-            const riderSocket = this.riderSockets.get(activeTrip.riderId);
-            if (riderSocket) {
-              this.send(riderSocket, {
-                type: "driver_location",
-                tripId: activeTrip.id,
-                driverId: clientId,
-                lat,
-                lng,
-              });
-            }
-          }
-
-          // Broadcast to map observers
+        if (res.success) {
           this.broadcastToObservers({
-            type: "telemetry_update",
-            driverId: clientId,
-            lat,
-            lng,
-            status:
-              this.driverRegistry.getDriver(clientId)?.status ?? "available",
+            type: "trip_cancelled",
+            requestId,
+            cancelledBy: "rider",
+            reason,
           });
         }
         break;
       }
 
+      // --- DRIVER MESSAGES ---
+      case "driver_telemetry": {
+        if (role !== "driver") {
+          this.send(socket, {
+            type: "error",
+            message: "Unauthorized: only drivers can send telemetry",
+          });
+          return;
+        }
+
+        const { lat, lng } = msg;
+        if (!isValidGeoPoint({ lat, lng })) {
+          this.send(socket, {
+            type: "error",
+            message: "Invalid telemetry coordinates",
+          });
+          return;
+        }
+
+        // Auto-register real WebSocket driver if not yet registered in DriverRegistry
+        let driver = this.driverRegistry.getDriver(clientId);
+        if (!driver) {
+          driver = this.driverRegistry.registerDriver(
+            clientId,
+            lat,
+            lng,
+            "available",
+          );
+        } else {
+          this.driverRegistry.updateLocation(clientId, lat, lng);
+        }
+
+        // If driver is currently on an active trip, stream GPS to matched rider
+        const activeTrip = this.stateMachine.getActiveTripForDriver(clientId);
+        if (
+          activeTrip &&
+          (activeTrip.status === "en_route" ||
+            activeTrip.status === "in_progress")
+        ) {
+          const riderSocket = this.riderSockets.get(activeTrip.riderId);
+          if (riderSocket) {
+            this.send(riderSocket, {
+              type: "driver_location",
+              tripId: activeTrip.id,
+              driverId: clientId,
+              lat,
+              lng,
+            });
+          }
+        }
+
+        // Broadcast to map observers
+        this.broadcastToObservers({
+          type: "telemetry_update",
+          driverId: clientId,
+          lat,
+          lng,
+          status:
+            this.driverRegistry.getDriver(clientId)?.status ?? "available",
+        });
+        break;
+      }
+
       case "ride_response": {
+        if (role !== "driver") {
+          this.send(socket, {
+            type: "error",
+            message: "Unauthorized: only drivers can respond to ride offers",
+          });
+          return;
+        }
+
         const { requestId, response } = msg;
         if (response === "accepted" || response === "rejected") {
+          // Verify that this driver is actually assigned to this offer
+          const activeOffer = this.matchingService.getActiveOffer(requestId);
+          if (!activeOffer || activeOffer.driverId !== clientId) {
+            this.send(socket, {
+              type: "response_ack",
+              requestId,
+              response,
+              success: false,
+              error:
+                "Unauthorized: driver is not offered this trip or offer expired",
+            });
+            return;
+          }
+
           const res = this.matchingService.handleDriverResponse(
             clientId,
             requestId,
@@ -206,7 +294,24 @@ export class WsManager {
       }
 
       case "driver_action": {
+        if (role !== "driver") {
+          this.send(socket, {
+            type: "error",
+            message: "Unauthorized: only drivers can perform driver actions",
+          });
+          return;
+        }
+
         const { action, tripId } = msg;
+        const trip = this.stateMachine.getTrip(tripId);
+        if (!trip || trip.driverId !== clientId) {
+          this.send(socket, {
+            type: "error",
+            message: "Unauthorized: driver is not assigned to this trip",
+          });
+          return;
+        }
+
         let res;
         if (action === "arrived") {
           res = this.stateMachine.driverArrived(tripId);

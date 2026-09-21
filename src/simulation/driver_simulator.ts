@@ -16,7 +16,7 @@ interface VirtualDriver {
 }
 
 export class DriverSimulator {
-  private readonly bounds: GeoBounds;
+  private bounds: GeoBounds;
   private readonly registry: DriverRegistry;
   private readonly stateMachine: TripStateMachine;
   private matchingService!: MatchingService;
@@ -24,6 +24,13 @@ export class DriverSimulator {
   private readonly virtualDrivers = new Map<string, VirtualDriver>();
   private tickInterval: NodeJS.Timeout | null = null;
   private isRunning = false;
+
+  public resetRegion(bounds: GeoBounds, driverCount: number = 40): void {
+    this.stop();
+    this.bounds = bounds;
+    this.virtualDrivers.clear();
+    this.start(driverCount);
+  }
 
   public onTelemetryTick?: (
     updates: Array<{ id: string; lat: number; lng: number; status: string }>,

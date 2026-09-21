@@ -10,6 +10,8 @@ export type TripStatus =
 
 export type ActorRole = "rider" | "driver" | "system";
 
+import { isValidGeoPoint } from "../utils/validation.js";
+
 export interface GeoPoint {
   lat: number;
   lng: number;
@@ -75,6 +77,7 @@ export class TripStateMachine {
 
   private readonly maxAuditBufferSize = 2000;
   private readonly auditEvents: StateTransitionEvent[] = [];
+  public onTransition?: (event: StateTransitionEvent, trip: Trip) => void;
 
   /**
    * Creates a new trip. Rejects if rider already has an active trip.
@@ -94,6 +97,15 @@ export class TripStateMachine {
         return { success: true, trip: existingTrip };
       }
       return { success: false, error: "Existing trip record not found" };
+    }
+
+    // Validate pickup and dropoff coordinates
+    if (!isValidGeoPoint(params.pickup) || !isValidGeoPoint(params.dropoff)) {
+      return {
+        success: false,
+        error:
+          "Invalid coordinates: lat must be [-90, 90] and lng must be [-180, 180]",
+      };
     }
 
     // Check if rider already has an active trip
@@ -285,6 +297,7 @@ export class TripStateMachine {
     };
 
     this.recordEvent(event);
+    this.onTransition?.(event, trip);
     return { success: true, trip, event };
   }
 

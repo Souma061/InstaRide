@@ -13,17 +13,35 @@
     "test:quadtree": "tsx tests/test_quadtree.ts",
     "test:dryrun": "tsx tests/quadtree.dryrun.ts",
     "test:state-machine": "tsx tests/test_trip_state_machine.ts",
-    "test:matching": "tsx tests/test_matching_service.ts"
+    "test:matching": "tsx tests/test_matching_service.ts",
+    "test:audit": "tsx tests/test_audit_fixes.ts",
+    "dev:frontend": "vite frontend",
+    "build:frontend": "vite build frontend",
+    "preview:frontend": "vite preview frontend"
   },
   "dependencies": {
+    "@fastify/static": "^10.1.4",
     "@fastify/websocket": "^11.3.0",
     "fastify": "^5.12.5",
+    "leaflet": "^1.9.4",
+    "lucide-react": "^1.47.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
     "ws": "^8.21.3"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/leaflet": "^1.9.22",
     "@types/node": "^26.6.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^6.1.1",
+    "autoprefixer": "^10.6.1",
+    "postcss": "^8.5.28",
+    "tailwindcss": "^4.3.3",
     "tsx": "^4.23.13",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0"
   }
 }
