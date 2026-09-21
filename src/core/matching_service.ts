@@ -125,8 +125,11 @@ export class MatchingService {
   public handleDriverResponse(
     driverId: string,
     requestId: string,
-    response: "accepted" | "rejected",
+    response: unknown,
   ): { success: boolean; error?: string } {
+    if (response !== "accepted" && response !== "rejected") {
+      return { success: false, error: "INVALID_RESPONSE: expected accepted or rejected" };
+    }
     const pendingOffer = this.activeOffers.get(requestId);
 
     // Strict 15.000s boundary check: if offer expired or was reassigned
@@ -138,7 +141,7 @@ export class MatchingService {
     }
 
     const now = Date.now();
-    if (now > pendingOffer.expiresAt) {
+    if (now >= pendingOffer.expiresAt) {
       // Clean up timer and resolve as timed out
       clearTimeout(pendingOffer.timer);
       this.activeOffers.delete(requestId);
@@ -199,6 +202,30 @@ export class MatchingService {
     }
 
     return { success: true };
+  }
+
+  /** Cancels in-flight work before replacing the spatial region. */
+  public reset(reason: string = "Operating region was reset"): void {
+    const activeTrips = this.stateMachine.getActiveTrips();
+    for (const trip of activeTrips) {
+      this.abortedRequests.add(trip.requestId);
+    }
+
+    for (const [requestId, offer] of this.activeOffers) {
+      clearTimeout(offer.timer);
+      this.activeOffers.delete(requestId);
+      this.driverRegistry.releaseLock(offer.driverId, requestId);
+      this.events.onOfferRevoked?.(offer.driverId, requestId, reason);
+      offer.resolve("cancelled");
+    }
+
+    for (const trip of activeTrips) {
+      const assignedDriverId = trip.driverId;
+      const result = this.stateMachine.cancelTrip(trip.id, "system", reason);
+      if (result.success && assignedDriverId) {
+        this.driverRegistry.completeTrip(assignedDriverId);
+      }
+    }
   }
 
   /**

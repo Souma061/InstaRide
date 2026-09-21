@@ -70,12 +70,18 @@ export class WsManager {
 
     socket.on("close", () => {
       if (role === "rider") {
-        this.riderSockets.delete(clientId);
+        // Do not let an older connection erase a replacement socket for the
+        // same authenticated client identity.
+        if (this.riderSockets.get(clientId) === socket) {
+          this.riderSockets.delete(clientId);
+        }
       } else if (role === "driver") {
-        this.driverSockets.delete(clientId);
-        const activeTrip = this.stateMachine.getActiveTripForDriver(clientId);
-        if (!activeTrip) {
-          this.driverRegistry.setStatus(clientId, "offline");
+        if (this.driverSockets.get(clientId) === socket) {
+          this.driverSockets.delete(clientId);
+          const activeTrip = this.stateMachine.getActiveTripForDriver(clientId);
+          if (!activeTrip) {
+            this.driverRegistry.setStatus(clientId, "offline");
+          }
         }
       } else {
         this.observerSockets.delete(socket);
@@ -217,8 +223,29 @@ export class WsManager {
             lng,
             "available",
           );
+          if (driver.status !== "available") {
+            this.send(socket, {
+              type: "error",
+              message: "Telemetry location is outside the active operating region",
+            });
+            return;
+          }
         } else {
-          this.driverRegistry.updateLocation(clientId, lat, lng);
+          if (!this.driverRegistry.updateLocation(clientId, lat, lng)) {
+            this.send(socket, {
+              type: "error",
+              message: "Telemetry location is outside the active operating region",
+            });
+            return;
+          }
+
+          // A disconnected or stale driver becomes offline. A valid telemetry
+          // update from its replacement connection explicitly reactivates it
+          // when it has no active trip.
+          const activeTrip = this.stateMachine.getActiveTripForDriver(clientId);
+          if (!activeTrip && driver.status === "offline") {
+            this.driverRegistry.setStatus(clientId, "available");
+          }
         }
 
         // If driver is currently on an active trip, stream GPS to matched rider

@@ -74,7 +74,14 @@ export interface CityPreset {
 export interface AuditLogEntry {
   id: string;
   timestamp: string;
-  type: "info" | "dispatch" | "lock" | "transition" | "revoke" | "error" | "concurrency";
+  type:
+    | "info"
+    | "dispatch"
+    | "lock"
+    | "transition"
+    | "revoke"
+    | "error"
+    | "concurrency";
   message: string;
   details?: Record<string, any>;
 }
@@ -89,3 +96,33 @@ export interface SystemStats {
   observersCount: number;
 }
 
+export interface CandidateAttempt {
+  driverId: string;
+  locked: boolean;
+  outcome: string;
+  reason?: string;
+}
+
+export interface ConcurrencyRaceResult {
+  timestamp: number;
+  targetContendedDriverId: string;
+  alice: {
+    riderId: string;
+    pickup: GeoPoint;
+    assignedDriverId: string | null;
+    attempts: CandidateAttempt[];
+  };
+  bob: {
+    riderId: string;
+    pickup: GeoPoint;
+    assignedDriverId: string | null;
+    attempts: CandidateAttempt[];
+  };
+  metrics: {
+    targetContention: string;
+    duplicateDispatchCount: number;
+    duplicateRatePercent: number;
+    casCollisionsResolved: number;
+    isolationVerified: boolean;
+  };
+}

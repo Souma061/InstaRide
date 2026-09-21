@@ -108,7 +108,7 @@ export const DriverCockpit: React.FC<DriverCockpitProps> = ({
               <span>Incoming Atomic Match Offer!</span>
             </div>
             <span className="text-xs font-mono font-bold text-amber-300">
-              15s Lease Active
+              Lease Active
             </span>
           </div>
           <p className="text-xs text-zinc-300">
@@ -184,4 +184,3 @@ export const DriverCockpit: React.FC<DriverCockpitProps> = ({
     </div>
   );
 };
-

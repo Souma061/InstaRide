@@ -17,6 +17,7 @@ export function App() {
     connectionStatus,
     drivers,
     activeTrip,
+    concurrencyRaceResult,
     systemStats,
     auditLogs,
     sendRideRequest,
@@ -27,6 +28,7 @@ export function App() {
     reseedRegion,
     spawnDriver,
     trigger2RiderRace,
+    clearRaceEvidence,
     clearAuditLogs,
   } = useInstaRideSocket(CITY_PRESETS[0]); // Default to Bengaluru
 
@@ -77,6 +79,7 @@ export function App() {
             activeBounds={activeBounds}
             drivers={drivers}
             activeTrip={activeTrip}
+            concurrencyRaceResult={concurrencyRaceResult}
             pickupPoint={pickupPoint}
             dropoffPoint={dropoffPoint}
             onSelectPickup={setPickupPoint}
@@ -158,6 +161,8 @@ export function App() {
             <ChaosTestingPanel
               onTrigger2RiderRace={trigger2RiderRace}
               onResetDrivers={() => switchCity(activeCity, 40)}
+              raceResult={concurrencyRaceResult}
+              onClearRaceResult={clearRaceEvidence}
             />
           )}
         </div>

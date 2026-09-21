@@ -29,6 +29,18 @@ export class DriverRegistry {
     this.spatialIndex = newSpatialIndex;
   }
 
+  public isWithinBounds(lat: number, lng: number): boolean {
+    const bounds = this.spatialIndex.root.bounds;
+    return (
+      Number.isFinite(lat) &&
+      Number.isFinite(lng) &&
+      lat >= bounds.minLat &&
+      lat <= bounds.maxLat &&
+      lng >= bounds.minLng &&
+      lng <= bounds.maxLng
+    );
+  }
+
   // Reconnection idempotency: preserves active trip and lock status if driver is already registered
   public registerDriver(
     id: string,
@@ -41,15 +53,21 @@ export class DriverRegistry {
       existing.lastSeen = Date.now();
       return existing;
     }
+    // A driver outside the active operating region must never be marked
+    // available: it cannot be represented by this region's spatial index.
+    const indexedStatus =
+      status === "available" && !this.isWithinBounds(lat, lng)
+        ? "offline"
+        : status;
     const record: DriverRecord = {
       id,
       lat,
       lng,
-      status,
+      status: indexedStatus,
       lastSeen: Date.now(),
     };
     this.drivers.set(id, record);
-    if (status === "available") {
+    if (indexedStatus === "available") {
       this.spatialIndex.insert(id, lat, lng);
     }
     return record;
@@ -73,6 +91,10 @@ export class DriverRegistry {
       return false;
     }
 
+    if (!this.isWithinBounds(lat, lng)) {
+      return false;
+    }
+
     driver.lat = lat;
     driver.lng = lng;
     driver.lastSeen = Date.now();
@@ -81,7 +103,12 @@ export class DriverRegistry {
 
     // Fast-path O(1) update only if available and not locked
     if (driver.status === "available" && !driver.lockToken) {
-      this.spatialIndex.update(id, lat, lng);
+      // A driver can be absent after a region reset or a previously failed
+      // insertion. Restore the spatial entry instead of silently accepting
+      // telemetry for an undiscoverable driver.
+      if (!this.spatialIndex.update(id, lat, lng)) {
+        return this.spatialIndex.insert(id, lat, lng);
+      }
     }
     return true;
   }
@@ -93,15 +120,25 @@ export class DriverRegistry {
       return false;
     }
     const oldStatus = driver.status;
-    driver.status = newStatus;
     driver.lastSeen = Date.now();
     if (newStatus !== "available") {
+      driver.status = newStatus;
       delete driver.lockToken;
       if (oldStatus === "available") {
         this.spatialIndex.remove(id);
       }
     } else if (!driver.lockToken) {
-      this.spatialIndex.insert(id, driver.lat, driver.lng);
+      if (!this.isWithinBounds(driver.lat, driver.lng)) {
+        driver.status = "offline";
+        return false;
+      }
+      driver.status = "available";
+      if (!this.spatialIndex.insert(id, driver.lat, driver.lng)) {
+        driver.status = "offline";
+        return false;
+      }
+    } else {
+      driver.status = "available";
     }
     return true;
   }

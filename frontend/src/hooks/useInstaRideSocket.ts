@@ -3,6 +3,7 @@ import {
   ActiveTrip,
   AuditLogEntry,
   CityPreset,
+  ConcurrencyRaceResult,
   Driver,
   GeoBounds,
   GeoPoint,
@@ -22,6 +23,8 @@ export function useInstaRideSocket(initialCity: CityPreset = CITY_PRESETS[0]) {
 
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [activeTrip, setActiveTrip] = useState<ActiveTrip | null>(null);
+  const [concurrencyRaceResult, setConcurrencyRaceResult] =
+    useState<ConcurrencyRaceResult | null>(null);
   const [systemStats, setSystemStats] = useState<SystemStats>({
     availableDrivers: 40,
     busyDrivers: 0,
@@ -167,10 +170,10 @@ export function useInstaRideSocket(initialCity: CityPreset = CITY_PRESETS[0]) {
               ...prev,
               driverId: msg.driverId,
               status: "matching",
-              activeCandidate: {
-                id: msg.driverId,
-                distanceMeters: msg.distanceMeters,
-                expiresAt: Date.now() + 15000,
+                activeCandidate: {
+                  id: msg.driverId,
+                  distanceMeters: msg.distanceMeters,
+                  expiresAt: msg.expiresAt,
               },
             };
           });
@@ -261,6 +264,16 @@ export function useInstaRideSocket(initialCity: CityPreset = CITY_PRESETS[0]) {
           break;
         }
 
+        case "concurrency_race_result": {
+          setConcurrencyRaceResult(msg);
+          addLog(
+            "concurrency",
+            `⚡ [Race Evidence] Contended: ${msg.targetContendedDriverId} | Alice -> ${msg.alice?.assignedDriverId} | Bob -> ${msg.bob?.assignedDriverId} (0% Duplicate)`,
+            msg,
+          );
+          break;
+        }
+
         default:
           break;
       }
@@ -268,14 +281,24 @@ export function useInstaRideSocket(initialCity: CityPreset = CITY_PRESETS[0]) {
     [addLog],
   );
 
-  // Connect on mount
+  // Connect on mount & sync initial city
   useEffect(() => {
     connect();
+    fetch("/simulator/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        bounds: initialCity.bounds,
+        cityName: initialCity.name,
+        driverCount: 40,
+      }),
+    }).catch(() => {});
+
     return () => {
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       if (socketRef.current) socketRef.current.close();
     };
-  }, [connect]);
+  }, [connect, initialCity]);
 
   // Actions
   const sendRideRequest = useCallback(
@@ -340,7 +363,14 @@ export function useInstaRideSocket(initialCity: CityPreset = CITY_PRESETS[0]) {
       );
       try {
         if (activeTrip.id && activeTrip.id !== "pending...") {
-          await fetch(`/rides/${activeTrip.id}/cancel`, { method: "POST" });
+          await fetch(`/rides/${activeTrip.id}/cancel`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              riderId: activeTrip.riderId,
+              reason,
+            }),
+          });
         }
         setActiveTrip((prev) =>
           prev ? { ...prev, status: "cancelled" } : null,
@@ -389,35 +419,34 @@ export function useInstaRideSocket(initialCity: CityPreset = CITY_PRESETS[0]) {
       "concurrency",
       "⚡ Firing 2-Rider Concurrency Race: Two simultaneous requests competing for 1 closest driver!",
     );
-    const center = activeCity.center;
-    const req1 = fetch("/rides", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        requestId: `race_alice_${Date.now()}`,
-        riderId: "rider_alice",
-        pickup: { lat: center.lat + 0.001, lng: center.lng + 0.001 },
-        dropoff: { lat: center.lat + 0.02, lng: center.lng + 0.02 },
-      }),
-    });
-    const req2 = fetch("/rides", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        requestId: `race_bob_${Date.now()}`,
-        riderId: "rider_bob",
-        pickup: { lat: center.lat + 0.0011, lng: center.lng + 0.0011 },
-        dropoff: { lat: center.lat + 0.021, lng: center.lng + 0.021 },
-      }),
-    });
-
-    const [res1, res2] = await Promise.all([req1, req2]);
-    const [d1, d2] = await Promise.all([res1.json(), res2.json()]);
-    addLog(
-      "concurrency",
-      `Race result: Rider Alice -> ${d1.success ? "Assigned" : "Queued"}, Rider Bob -> ${d2.success ? "Assigned" : "Queued"} (0% Duplicate)`,
-    );
-  }, [activeCity, addLog]);
+    try {
+      const res = await fetch("/simulator/concurrency-race", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          center: activeCity.center,
+          bounds: activeBounds,
+          cityName: activeCity.name,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.metrics) {
+        setConcurrencyRaceResult(data);
+        addLog(
+          "concurrency",
+          `✅ Race Invariant Verified: Alice -> ${data.alice.assignedDriverId}, Bob -> ${data.bob.assignedDriverId} (0% Duplicate)`,
+          data,
+        );
+      } else {
+        addLog(
+          "error",
+          `Race simulation failed: ${data.error || "Bad Request"}`,
+        );
+      }
+    } catch (e) {
+      addLog("error", `Error triggering concurrency race: ${String(e)}`);
+    }
+  }, [activeCity, activeBounds, addLog]);
 
   const reseedRegion = useCallback(
     async (
@@ -562,6 +591,7 @@ export function useInstaRideSocket(initialCity: CityPreset = CITY_PRESETS[0]) {
     connectionStatus,
     drivers,
     activeTrip,
+    concurrencyRaceResult,
     systemStats,
     auditLogs,
     sendRideRequest,
@@ -572,6 +602,7 @@ export function useInstaRideSocket(initialCity: CityPreset = CITY_PRESETS[0]) {
     reseedRegion,
     spawnDriver,
     trigger2RiderRace,
+    clearRaceEvidence: () => setConcurrencyRaceResult(null),
     clearAuditLogs: () => setAuditLogs([]),
   };
 }

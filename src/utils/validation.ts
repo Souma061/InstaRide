@@ -3,6 +3,13 @@ export interface GeoPoint {
   lng: number;
 }
 
+export interface GeoBounds {
+  minLat: number;
+  maxLat: number;
+  minLng: number;
+  maxLng: number;
+}
+
 /**
  * Validates that an input is a non-null object with finite, valid latitude and longitude.
  * Latitude must be within [-90, 90] and Longitude within [-180, 180].
@@ -25,6 +32,26 @@ export function isValidGeoPoint(point: any): point is GeoPoint {
     lat <= 90 &&
     lng >= -180 &&
     lng <= 180
+  );
+}
+
+/** Validates a non-degenerate geographic operating region. */
+export function isValidGeoBounds(bounds: any): bounds is GeoBounds {
+  if (!bounds || typeof bounds !== "object") {
+    return false;
+  }
+
+  const { minLat, maxLat, minLng, maxLng } = bounds;
+  return (
+    [minLat, maxLat, minLng, maxLng].every(
+      (value) => typeof value === "number" && Number.isFinite(value),
+    ) &&
+    minLat >= -90 &&
+    maxLat <= 90 &&
+    minLng >= -180 &&
+    maxLng <= 180 &&
+    minLat < maxLat &&
+    minLng < maxLng
   );
 }
 

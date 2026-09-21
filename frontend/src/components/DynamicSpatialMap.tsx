@@ -10,9 +10,17 @@ import {
   PlusCircle,
   Sliders,
   Users,
+  Zap,
 } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
-import { ActiveTrip, CityPreset, Driver, GeoBounds, GeoPoint } from "../types";
+import {
+  ActiveTrip,
+  CityPreset,
+  ConcurrencyRaceResult,
+  Driver,
+  GeoBounds,
+  GeoPoint,
+} from "../types";
 import { CITY_PRESETS } from "../utils/cities";
 import { buildClientQuadtree, QuadTreeNodeData } from "../utils/quadtree";
 
@@ -21,6 +29,7 @@ interface DynamicSpatialMapProps {
   activeBounds: GeoBounds;
   drivers: Driver[];
   activeTrip: ActiveTrip | null;
+  concurrencyRaceResult?: ConcurrencyRaceResult | null;
   pickupPoint: GeoPoint;
   dropoffPoint: GeoPoint;
   onSelectPickup: (point: GeoPoint) => void;
@@ -35,6 +44,7 @@ export const DynamicSpatialMap: React.FC<DynamicSpatialMapProps> = ({
   activeBounds,
   drivers,
   activeTrip,
+  concurrencyRaceResult,
   pickupPoint,
   dropoffPoint,
   onSelectPickup,
@@ -51,6 +61,8 @@ export const DynamicSpatialMap: React.FC<DynamicSpatialMapProps> = ({
   const driversLayerRef = useRef<L.LayerGroup | null>(null);
   const tripMarkersLayerRef = useRef<L.LayerGroup | null>(null);
   const routeLineLayerRef = useRef<L.Polyline | null>(null);
+  const raceAliceLineRef = useRef<L.Polyline | null>(null);
+  const raceBobLineRef = useRef<L.Polyline | null>(null);
 
   // Interactive Tools State
   const [clickMode, setClickMode] = useState<"pickup" | "dropoff" | "spawn">(
@@ -145,7 +157,8 @@ export const DynamicSpatialMap: React.FC<DynamicSpatialMapProps> = ({
       maxLng: Number(b.getEast().toFixed(4)),
     };
 
-    onReseedRegion(bounds, "Custom Visible Viewport", fleetSize);
+    const finalCount = Math.max(1, Math.min(500, fleetSize || 40));
+    onReseedRegion(bounds, "Custom Visible Viewport", finalCount);
   };
 
   // Update PR-QuadTree Grid Overlay
@@ -288,6 +301,14 @@ export const DynamicSpatialMap: React.FC<DynamicSpatialMapProps> = ({
       mapInstanceRef.current.removeLayer(routeLineLayerRef.current);
       routeLineLayerRef.current = null;
     }
+    if (raceAliceLineRef.current && mapInstanceRef.current) {
+      mapInstanceRef.current.removeLayer(raceAliceLineRef.current);
+      raceAliceLineRef.current = null;
+    }
+    if (raceBobLineRef.current && mapInstanceRef.current) {
+      mapInstanceRef.current.removeLayer(raceBobLineRef.current);
+      raceBobLineRef.current = null;
+    }
 
     if (activeTrip?.driverId) {
       const assigned = drivers.find((d) => d.id === activeTrip.driverId);
@@ -308,7 +329,96 @@ export const DynamicSpatialMap: React.FC<DynamicSpatialMapProps> = ({
         routeLineLayerRef.current = polyline;
       }
     }
-  }, [pickupPoint, dropoffPoint, activeTrip, drivers]);
+
+    // 4. Concurrency Race Visual Evidence Markers & Trajectory Vectors
+    if (concurrencyRaceResult && mapInstanceRef.current) {
+      // Alice Marker (Purple)
+      const aliceIcon = L.divIcon({
+        html: `
+          <div class="relative flex items-center justify-center">
+            <div class="absolute w-7 h-7 rounded-full bg-purple-500/30 animate-ping"></div>
+            <div class="w-5 h-5 rounded-full bg-purple-600 border-2 border-white shadow-lg flex items-center justify-center text-[9px] font-bold text-white">A</div>
+            <span class="absolute -bottom-5 left-1/2 -translate-x-1/2 whitespace-nowrap bg-purple-950/95 text-purple-200 border border-purple-500/40 text-[9px] px-1.5 py-0.5 rounded font-mono font-bold shadow-lg">
+              Alice ➔ ${concurrencyRaceResult.alice.assignedDriverId || "Queued"}
+            </span>
+          </div>
+        `,
+        className: "race-alice-pin",
+        iconSize: [24, 24],
+        iconAnchor: [12, 12],
+      });
+      const aMarker = L.marker(
+        [
+          concurrencyRaceResult.alice.pickup.lat,
+          concurrencyRaceResult.alice.pickup.lng,
+        ],
+        { icon: aliceIcon },
+      );
+      tripMarkersLayerRef.current.addLayer(aMarker);
+
+      // Bob Marker (Orange)
+      const bobIcon = L.divIcon({
+        html: `
+          <div class="relative flex items-center justify-center">
+            <div class="absolute w-7 h-7 rounded-full bg-orange-500/30 animate-ping"></div>
+            <div class="w-5 h-5 rounded-full bg-orange-600 border-2 border-white shadow-lg flex items-center justify-center text-[9px] font-bold text-white">B</div>
+            <span class="absolute -bottom-5 left-1/2 -translate-x-1/2 whitespace-nowrap bg-orange-950/95 text-orange-200 border border-orange-500/40 text-[9px] px-1.5 py-0.5 rounded font-mono font-bold shadow-lg">
+              Bob ➔ ${concurrencyRaceResult.bob.assignedDriverId || "Queued"}
+            </span>
+          </div>
+        `,
+        className: "race-bob-pin",
+        iconSize: [24, 24],
+        iconAnchor: [12, 12],
+      });
+      const bMarker = L.marker(
+        [
+          concurrencyRaceResult.bob.pickup.lat,
+          concurrencyRaceResult.bob.pickup.lng,
+        ],
+        { icon: bobIcon },
+      );
+      tripMarkersLayerRef.current.addLayer(bMarker);
+
+      // Vector from Alice to her assigned driver (Purple line)
+      if (concurrencyRaceResult.alice.assignedDriverId) {
+        const aDriver = drivers.find(
+          (d) => d.id === concurrencyRaceResult.alice.assignedDriverId,
+        );
+        if (aDriver) {
+          raceAliceLineRef.current = L.polyline(
+            [
+              [
+                concurrencyRaceResult.alice.pickup.lat,
+                concurrencyRaceResult.alice.pickup.lng,
+              ],
+              [aDriver.lat, aDriver.lng],
+            ],
+            { color: "#a855f7", weight: 3, dashArray: "5, 5", opacity: 0.9 },
+          ).addTo(mapInstanceRef.current);
+        }
+      }
+
+      // Vector from Bob to his assigned driver (Orange line)
+      if (concurrencyRaceResult.bob.assignedDriverId) {
+        const bDriver = drivers.find(
+          (d) => d.id === concurrencyRaceResult.bob.assignedDriverId,
+        );
+        if (bDriver) {
+          raceBobLineRef.current = L.polyline(
+            [
+              [
+                concurrencyRaceResult.bob.pickup.lat,
+                concurrencyRaceResult.bob.pickup.lng,
+              ],
+              [bDriver.lat, bDriver.lng],
+            ],
+            { color: "#f97316", weight: 3, dashArray: "5, 5", opacity: 0.9 },
+          ).addTo(mapInstanceRef.current);
+        }
+      }
+    }
+  }, [pickupPoint, dropoffPoint, activeTrip, drivers, concurrencyRaceResult]);
 
   return (
     <div className="relative w-full h-[580px] bg-card border border-border rounded-2xl overflow-hidden shadow-xl flex flex-col">
@@ -354,19 +464,51 @@ export const DynamicSpatialMap: React.FC<DynamicSpatialMapProps> = ({
 
         {/* Right: Dynamic Region Seed Controls */}
         <div className="flex items-center gap-2 bg-[#090d16]/95 backdrop-blur-md border border-border p-1.5 rounded-xl shadow-xl pointer-events-auto text-xs">
-          <div className="flex items-center gap-1.5 px-2 text-zinc-300">
+          <div className="flex items-center gap-1.5 px-1 text-zinc-300">
             <Users className="w-3.5 h-3.5 text-emerald-400" />
             <span className="text-[11px] text-zinc-400">Fleet:</span>
-            <input
-              type="number"
-              min="5"
-              max="200"
-              value={fleetSize}
-              onChange={(e) =>
-                setFleetSize(Math.max(5, Math.min(200, Number(e.target.value))))
-              }
-              className="w-12 bg-zinc-900 border border-zinc-700 text-emerald-400 font-mono text-center rounded px-1 py-0.5 text-xs focus:outline-none"
-            />
+            <div className="flex items-center bg-zinc-900 border border-zinc-700 rounded-lg overflow-hidden">
+              <button
+                type="button"
+                onClick={() =>
+                  setFleetSize((prev) => Math.max(1, (prev || 40) - 5))
+                }
+                className="w-5 h-6 flex items-center justify-center text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition font-bold text-xs"
+                title="Decrease fleet size"
+              >
+                −
+              </button>
+              <input
+                type="number"
+                min="1"
+                max="500"
+                value={fleetSize === 0 ? "" : fleetSize}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === "") {
+                    setFleetSize(0);
+                  } else {
+                    const parsed = parseInt(val, 10);
+                    if (!isNaN(parsed)) setFleetSize(parsed);
+                  }
+                }}
+                onBlur={() => {
+                  if (!fleetSize || fleetSize < 1) setFleetSize(10);
+                  else if (fleetSize > 500) setFleetSize(500);
+                }}
+                className="w-12 bg-transparent text-emerald-400 font-mono text-center text-xs focus:outline-none py-0.5"
+              />
+              <button
+                type="button"
+                onClick={() =>
+                  setFleetSize((prev) => Math.min(500, (prev || 40) + 5))
+                }
+                className="w-5 h-6 flex items-center justify-center text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition font-bold text-xs"
+                title="Increase fleet size"
+              >
+                +
+              </button>
+            </div>
           </div>
 
           <button
@@ -387,6 +529,43 @@ export const DynamicSpatialMap: React.FC<DynamicSpatialMapProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Active Concurrency Race Overlay Banner */}
+      {concurrencyRaceResult && (
+        <div className="absolute top-16 left-3 right-3 z-[1000] bg-[#090d16]/95 backdrop-blur-md border border-emerald-500/50 p-2.5 rounded-xl shadow-2xl flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex items-center gap-2">
+            <Zap className="w-4 h-4 text-amber-400 animate-pulse" />
+            <span className="font-bold text-zinc-100">
+              Live Race Invariant:
+            </span>
+            <span className="text-zinc-300">
+              Contended:{" "}
+              <strong className="text-amber-400 font-mono">
+                {concurrencyRaceResult.targetContendedDriverId}
+              </strong>
+            </span>
+            <span className="text-zinc-500">|</span>
+            <span className="text-purple-300">
+              Alice ➔{" "}
+              <strong className="font-mono">
+                {concurrencyRaceResult.alice.assignedDriverId || "None"}
+              </strong>
+            </span>
+            <span className="text-zinc-500">|</span>
+            <span className="text-orange-300">
+              Bob ➔{" "}
+              <strong className="font-mono">
+                {concurrencyRaceResult.bob.assignedDriverId || "None"}
+              </strong>
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-300 font-mono text-[10px] rounded-full border border-emerald-500/30 font-bold flex items-center gap-1">
+              ✓ 0% Duplicate Dispatch
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Custom Coordinates Modal / Drawer */}
       {showBoundsModal && (

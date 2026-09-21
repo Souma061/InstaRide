@@ -94,6 +94,12 @@ export class TripStateMachine {
     if (existingTripId) {
       const existingTrip = this.trips.get(existingTripId);
       if (existingTrip) {
+        if (existingTrip.riderId !== params.riderId) {
+          return {
+            success: false,
+            error: "requestId is already associated with another rider",
+          };
+        }
         return { success: true, trip: existingTrip };
       }
       return { success: false, error: "Existing trip record not found" };
@@ -370,6 +376,12 @@ export class TripStateMachine {
       return undefined;
     }
     return this.trips.get(tripId);
+  }
+
+  public getActiveTrips(): Trip[] {
+    return Array.from(this.activeRiderTrips.values())
+      .map((tripId) => this.trips.get(tripId))
+      .filter((trip): trip is Trip => trip !== undefined);
   }
 
   public getRecentAuditEvents(

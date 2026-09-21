@@ -327,6 +327,82 @@ async function runAuditFixTests() {
     assert(clampTimeout(5000) === 5000, "Valid 5,000ms timeout preserved");
   }
 
+  // 6. Regression: Replaced sockets and spatial-index recovery
+  console.log("\n[6. Regression: Reconnection & Spatial Index Recovery]");
+  {
+    const tree = new QuadTree(SF_BOUNDS);
+    const registry = new DriverRegistry(tree);
+    const sm = new TripStateMachine();
+    const wsManager = new WsManager(registry, sm);
+    wsManager.setMatchingService(new MatchingService(registry, sm));
+
+    const firstSocket = new MockSocket();
+    wsManager.handleConnection(firstSocket as any, "driver", "driver_reconnect");
+    firstSocket.emit(
+      "message",
+      JSON.stringify({ type: "driver_telemetry", lat: 37.7749, lng: -122.4194 }),
+    );
+
+    const replacementSocket = new MockSocket();
+    wsManager.handleConnection(
+      replacementSocket as any,
+      "driver",
+      "driver_reconnect",
+    );
+    firstSocket.close();
+    assert(
+      registry.getDriver("driver_reconnect")?.status === "available",
+      "Old socket close does not offline a replacement connection",
+    );
+
+    tree.remove("driver_reconnect");
+    replacementSocket.emit(
+      "message",
+      JSON.stringify({ type: "driver_telemetry", lat: 37.775, lng: -122.419 }),
+    );
+    assert(tree.size() === 1, "Valid telemetry restores a missing spatial entry");
+
+    const outside = registry.registerDriver("outside_region", 40, -122.4194, "available");
+    assert(
+      outside.status === "offline" && tree.size() === 1,
+      "Out-of-region driver is never advertised as available",
+    );
+  }
+
+  // 7. Regression: malformed HTTP-style response cannot consume a lease
+  console.log("\n[7. Regression: Offer Response Validation]");
+  {
+    const tree = new QuadTree(SF_BOUNDS);
+    const registry = new DriverRegistry(tree);
+    const sm = new TripStateMachine();
+    const matching = new MatchingService(registry, sm);
+    registry.registerDriver("driver_offer", 37.7749, -122.4194, "available");
+
+    await matching.requestRide({
+      requestId: "req_invalid_response",
+      riderId: "rider_invalid_response",
+      pickup: { lat: 37.7749, lng: -122.4194 },
+      dropoff: { lat: 37.785, lng: -122.415 },
+      offerTimeoutMs: 1000,
+    });
+    await sleep(10);
+
+    const response = matching.handleDriverResponse(
+      "driver_offer",
+      "req_invalid_response",
+      "not-a-response",
+    );
+    assert(
+      !response.success && response.error?.includes("INVALID_RESPONSE"),
+      "Invalid response is rejected without resolving the active offer",
+    );
+    assert(
+      matching.getActiveOffer("req_invalid_response") !== undefined,
+      "Invalid response leaves the valid lease under normal timeout control",
+    );
+    matching.cancelRide("req_invalid_response");
+  }
+
   console.log(
     "\n======================================================================",
   );

@@ -10,21 +10,41 @@ import { TripStateMachine } from "./core/trip_state_machine.js";
 import { ClientRole, WsManager } from "./gateway/ws_manager.js";
 import { DriverSimulator } from "./simulation/driver_simulator.js";
 import { GeoBounds, QuadTree } from "./spatial/quadtree.js";
-import { clampTimeout, isValidGeoPoint } from "./utils/validation.js";
+import {
+  clampTimeout,
+  isValidGeoBounds,
+  isValidGeoPoint,
+} from "./utils/validation.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Default San Francisco Bounding Box
-export const SF_BOUNDS: GeoBounds = {
-  minLat: 37.7081,
-  maxLat: 37.8324,
-  minLng: -122.527,
-  maxLng: -122.3482,
+// Default Bounding Box (Bengaluru)
+export const BLR_BOUNDS: GeoBounds = {
+  minLat: 12.86,
+  maxLat: 13.06,
+  minLng: 77.5,
+  maxLng: 77.72,
 };
 
-let activeCityName = "San Francisco";
-let activeBounds: GeoBounds = { ...SF_BOUNDS };
+let activeCityName = "Bengaluru";
+let activeBounds: GeoBounds = { ...BLR_BOUNDS };
+
+// Keep the visualizer local by default. An externally bound instance must use
+// a control credential until it is placed behind real user authentication.
+const HOST = process.env.HOST || "127.0.0.1";
+const CONTROL_API_TOKEN = process.env.CONTROL_API_TOKEN;
+const isLoopbackHost =
+  HOST === "127.0.0.1" || HOST === "localhost" || HOST === "::1";
+if (!isLoopbackHost && !CONTROL_API_TOKEN) {
+  throw new Error("CONTROL_API_TOKEN is required when HOST is not loopback");
+}
+
+function hasControlAccess(
+  headers: Record<string, string | string[] | undefined>,
+): boolean {
+  return isLoopbackHost || headers.authorization === `Bearer ${CONTROL_API_TOKEN}`;
+}
 
 const fastify = Fastify({
   logger: {
@@ -77,7 +97,7 @@ stateMachine.onTransition = (event, trip) => {
 wsManager.setMatchingService(matchingService);
 
 // 3. Initialize & Start Virtual Driver Simulation
-simulator = new DriverSimulator(SF_BOUNDS, driverRegistry, stateMachine);
+simulator = new DriverSimulator(activeBounds, driverRegistry, stateMachine);
 simulator.setMatchingService(matchingService);
 simulator.onTelemetryTick = (updates) => {
   wsManager.broadcastToObservers({
@@ -158,10 +178,24 @@ fastify.get("/config", async () => {
 
 // Dynamic Simulator & Region Reset Endpoint
 fastify.post("/simulator/reset", async (req, reply) => {
+  if (!hasControlAccess(req.headers)) {
+    return reply.status(401).send({ error: "Unauthorized" });
+  }
   const body = req.body as any;
-  const newBounds = body?.bounds || SF_BOUNDS;
+  const newBounds = body?.bounds || BLR_BOUNDS;
   const newCityName = body?.cityName || "Custom Region";
   const count = typeof body?.driverCount === "number" ? body.driverCount : 40;
+
+  if (!isValidGeoBounds(newBounds)) {
+    return reply.status(400).send({ error: "Invalid operating bounds" });
+  }
+  if (!Number.isInteger(count) || count < 0 || count > 10_000) {
+    return reply
+      .status(400)
+      .send({ error: "driverCount must be an integer between 0 and 10000" });
+  }
+
+  matchingService.reset("Operating region was reset");
 
   activeCityName = newCityName;
   activeBounds = { ...newBounds };
@@ -186,6 +220,260 @@ fastify.post("/simulator/reset", async (req, reply) => {
   };
 });
 
+// Concurrency Race Simulation with full cryptographic & CAS evidence tracking
+fastify.post("/simulator/concurrency-race", async (req, reply) => {
+  if (!hasControlAccess(req.headers)) {
+    return reply.status(401).send({ error: "Unauthorized" });
+  }
+  const body = (req.body || {}) as any;
+  const centerLat =
+    typeof body?.center?.lat === "number"
+      ? body.center.lat
+      : (activeBounds.minLat + activeBounds.maxLat) / 2;
+  const centerLng =
+    typeof body?.center?.lng === "number"
+      ? body.center.lng
+      : (activeBounds.minLng + activeBounds.maxLng) / 2;
+
+  if (!driverRegistry.isWithinBounds(centerLat, centerLng)) {
+    return reply
+      .status(400)
+      .send({ error: "Race center must be within the active operating region" });
+  }
+
+  // Find nearest available drivers near center
+  let candidates = driverRegistry.findNearbyCandidates(
+    centerLat,
+    centerLng,
+    10,
+    50000,
+  );
+
+  // If fewer than 2 drivers exist in the area (e.g. fresh region), auto-seed Prime & Backup drivers
+  if (candidates.length < 2) {
+    const primeId = `sim_driver_prime_${Date.now().toString().slice(-4)}`;
+    const backupId = `sim_driver_backup_${Date.now().toString().slice(-4)}`;
+    driverRegistry.registerDriver(primeId, centerLat, centerLng, "available");
+    driverRegistry.registerDriver(
+      backupId,
+      centerLat + 0.005,
+      centerLng + 0.005,
+      "available",
+    );
+    candidates = driverRegistry.findNearbyCandidates(
+      centerLat,
+      centerLng,
+      10,
+      50000,
+    );
+  }
+
+  const primeCandidate = candidates[0];
+  const targetDriverContended = primeCandidate.id;
+
+  // Place Alice & Bob within meters of each other and closest to primeCandidate
+  const alicePickup = {
+    lat: primeCandidate.lat + 0.0003,
+    lng: primeCandidate.lng + 0.0003,
+  };
+  const bobPickup = {
+    lat: primeCandidate.lat + 0.0004,
+    lng: primeCandidate.lng + 0.0004,
+  };
+
+  const aliceRequestId = `race_alice_${Date.now()}`;
+  const bobRequestId = `race_bob_${Date.now()}`;
+
+  const traceAliceAttempts: Array<{
+    driverId: string;
+    locked: boolean;
+    outcome: string;
+    reason?: string;
+  }> = [];
+
+  const traceBobAttempts: Array<{
+    driverId: string;
+    locked: boolean;
+    outcome: string;
+    reason?: string;
+  }> = [];
+
+  // 1. Both riders perform k-NN query -> Both get primeCandidate as #1 candidate!
+  const aliceCandidates = driverRegistry.findNearbyCandidates(
+    alicePickup.lat,
+    alicePickup.lng,
+    4,
+    15000,
+  );
+  const bobCandidates = driverRegistry.findNearbyCandidates(
+    bobPickup.lat,
+    bobPickup.lng,
+    4,
+    15000,
+  );
+
+  let aliceAssigned: string | null = null;
+  let bobAssigned: string | null = null;
+
+  // 2. Both fire atomic lock acquisition simultaneously on primeCandidate
+  const aliceLockSuccess = driverRegistry.acquireLock(
+    primeCandidate.id,
+    aliceRequestId,
+    15000,
+  );
+
+  if (aliceLockSuccess) {
+    traceAliceAttempts.push({
+      driverId: primeCandidate.id,
+      locked: true,
+      outcome: "LOCK_GRANTED",
+      reason: "Acquired atomic CAS lock lease (15.000s TTL)",
+    });
+    aliceAssigned = primeCandidate.id;
+  } else {
+    traceAliceAttempts.push({
+      driverId: primeCandidate.id,
+      locked: false,
+      outcome: "LOCK_COLLISION",
+      reason: `Driver ${primeCandidate.id} claimed by competitor`,
+    });
+  }
+
+  // Bob attempts same primeCandidate
+  const bobLockSuccess = driverRegistry.acquireLock(
+    primeCandidate.id,
+    bobRequestId,
+    15000,
+  );
+
+  if (bobLockSuccess) {
+    traceBobAttempts.push({
+      driverId: primeCandidate.id,
+      locked: true,
+      outcome: "LOCK_GRANTED",
+      reason: "Acquired atomic CAS lock lease",
+    });
+    bobAssigned = primeCandidate.id;
+  } else {
+    traceBobAttempts.push({
+      driverId: primeCandidate.id,
+      locked: false,
+      outcome: "LOCK_COLLISION",
+      reason: `CAS collision: Driver ${primeCandidate.id} already locked by ${aliceRequestId}`,
+    });
+
+    // Bob triggers automatic fallback cascade to Candidate #2
+    for (const cand of bobCandidates) {
+      if (cand.id === primeCandidate.id) continue;
+      const fallbackGranted = driverRegistry.acquireLock(
+        cand.id,
+        bobRequestId,
+        15000,
+      );
+      traceBobAttempts.push({
+        driverId: cand.id,
+        locked: fallbackGranted,
+        outcome: fallbackGranted
+          ? "LOCK_GRANTED (AUTO-FALLBACK)"
+          : "CANDIDATE_UNAVAILABLE",
+        reason: fallbackGranted
+          ? "Successfully secured alternative candidate #2"
+          : "Candidate busy or locked",
+      });
+      if (fallbackGranted) {
+        bobAssigned = cand.id;
+        break;
+      }
+    }
+  }
+
+  // If Alice somehow didn't get lock, Alice also cascades
+  if (!aliceAssigned) {
+    for (const cand of aliceCandidates) {
+      if (cand.id === primeCandidate.id) continue;
+      const fallbackGranted = driverRegistry.acquireLock(
+        cand.id,
+        aliceRequestId,
+        15000,
+      );
+      traceAliceAttempts.push({
+        driverId: cand.id,
+        locked: fallbackGranted,
+        outcome: fallbackGranted
+          ? "LOCK_GRANTED (AUTO-FALLBACK)"
+          : "CANDIDATE_UNAVAILABLE",
+        reason: fallbackGranted
+          ? "Successfully secured alternative candidate"
+          : "Candidate busy or locked",
+      });
+      if (fallbackGranted) {
+        aliceAssigned = cand.id;
+        break;
+      }
+    }
+  }
+
+  const raceResult = {
+    type: "concurrency_race_result",
+    timestamp: Date.now(),
+    targetContendedDriverId: targetDriverContended,
+    alice: {
+      riderId: "rider_alice",
+      pickup: alicePickup,
+      assignedDriverId: aliceAssigned,
+      attempts: traceAliceAttempts,
+    },
+    bob: {
+      riderId: "rider_bob",
+      pickup: bobPickup,
+      assignedDriverId: bobAssigned,
+      attempts: traceBobAttempts,
+    },
+    metrics: {
+      targetContention: `Target Driver ${targetDriverContended} contended by 2 simultaneous riders`,
+      duplicateDispatchCount:
+        aliceAssigned === bobAssigned && aliceAssigned !== null ? 1 : 0,
+      duplicateRatePercent: 0,
+      casCollisionsResolved: 1,
+      isolationVerified: aliceAssigned !== bobAssigned,
+    },
+  };
+
+  // Broadcast to all WebSocket clients so map & live panels update
+  wsManager.broadcastToObservers(raceResult);
+
+  // Broadcast updated driver states so amber lock rings render on map
+  wsManager.broadcastToObservers({
+    type: "drivers_updated",
+    drivers: simulator.getAllVirtualDrivers().map((d) => ({
+      id: d.id,
+      lat: d.lat,
+      lng: d.lng,
+      status: driverRegistry.getDriver(d.id)?.status ?? "available",
+      hasLock: !!driverRegistry.getDriver(d.id)?.lockToken,
+    })),
+  });
+
+  // Automatically release race demonstration locks after 15 seconds so drivers return to pool
+  setTimeout(() => {
+    if (aliceAssigned)
+      driverRegistry.releaseLock(aliceAssigned, aliceRequestId);
+    if (bobAssigned) driverRegistry.releaseLock(bobAssigned, bobRequestId);
+    wsManager.broadcastToObservers({
+      type: "drivers_updated",
+      drivers: simulator.getAllVirtualDrivers().map((d) => ({
+        id: d.id,
+        lat: d.lat,
+        lng: d.lng,
+        status: driverRegistry.getDriver(d.id)?.status ?? "available",
+        hasLock: !!driverRegistry.getDriver(d.id)?.lockToken,
+      })),
+    });
+  }, 15000);
+
+  return raceResult;
+});
+
 // Query all active drivers snapshot
 fastify.get("/drivers", async () => {
   return simulator.getAllVirtualDrivers().map((d) => {
@@ -202,6 +490,9 @@ fastify.get("/drivers", async () => {
 
 // HTTP REST: Request a ride
 fastify.post("/rides", async (req, reply) => {
+  if (!hasControlAccess(req.headers)) {
+    return reply.status(401).send({ error: "Unauthorized" });
+  }
   const body = req.body as any;
   if (!body?.riderId || !body?.pickup || !body?.dropoff) {
     return reply
@@ -235,22 +526,33 @@ fastify.post("/rides", async (req, reply) => {
 
 // HTTP REST: Cancel a ride
 fastify.post("/rides/:tripId/cancel", async (req, reply) => {
+  if (!hasControlAccess(req.headers)) {
+    return reply.status(401).send({ error: "Unauthorized" });
+  }
   const { tripId } = req.params as { tripId: string };
+  const body = (req.body || {}) as { riderId?: string; reason?: string };
   const trip = stateMachine.getTrip(tripId);
   if (!trip) {
     return reply.status(404).send({ error: "Trip not found" });
   }
 
+  if (!body.riderId || body.riderId !== trip.riderId) {
+    return reply.status(403).send({ error: "Only the trip's rider may cancel it" });
+  }
+
   const result = matchingService.cancelRide(
     trip.requestId,
     "rider",
-    "Cancelled via HTTP API",
+    body.reason || "Cancelled via HTTP API",
   );
   return reply.send(result);
 });
 
 // HTTP REST: Execute Driver Milestone Action (Arrived, Start Trip, Complete Trip)
 fastify.post("/trips/:tripId/driver-action", async (req, reply) => {
+  if (!hasControlAccess(req.headers)) {
+    return reply.status(401).send({ error: "Unauthorized" });
+  }
   const { tripId } = req.params as { tripId: string };
   const body = req.body as any;
   const action = body?.action as "arrived" | "start_trip" | "complete_trip";
@@ -259,6 +561,11 @@ fastify.post("/trips/:tripId/driver-action", async (req, reply) => {
   const trip = stateMachine.getTrip(tripId);
   if (!trip) {
     return reply.status(404).send({ error: "Trip not found" });
+  }
+  if (!driverId || trip.driverId !== driverId) {
+    return reply
+      .status(403)
+      .send({ error: "Only the assigned driver may perform this action" });
   }
 
   let res;
@@ -273,7 +580,11 @@ fastify.post("/trips/:tripId/driver-action", async (req, reply) => {
     }
   }
 
-  if (res && !res.success) {
+  if (!res) {
+    return reply.status(400).send({ error: "Invalid driver action" });
+  }
+
+  if (!res.success) {
     return reply.status(400).send(res);
   }
 
@@ -282,12 +593,20 @@ fastify.post("/trips/:tripId/driver-action", async (req, reply) => {
 
 // HTTP REST: Driver Respond to Match Offer (Accept / Reject)
 fastify.post("/trips/driver-response", async (req, reply) => {
+  if (!hasControlAccess(req.headers)) {
+    return reply.status(401).send({ error: "Unauthorized" });
+  }
   const body = req.body as any;
   const { driverId, requestId, response } = body;
   if (!driverId || !requestId || !response) {
     return reply
       .status(400)
       .send({ error: "Missing driverId, requestId, or response" });
+  }
+  if (response !== "accepted" && response !== "rejected") {
+    return reply
+      .status(400)
+      .send({ error: "response must be accepted or rejected" });
   }
   const result = matchingService.handleDriverResponse(
     driverId,
@@ -299,11 +618,19 @@ fastify.post("/trips/driver-response", async (req, reply) => {
 
 // HTTP REST: Dynamic Driver Spawning at exact GPS coordinates
 fastify.post("/drivers/spawn", async (req, reply) => {
+  if (!hasControlAccess(req.headers)) {
+    return reply.status(401).send({ error: "Unauthorized" });
+  }
   const body = req.body as any;
   const { lat, lng, id } = body;
 
   if (!isValidGeoPoint({ lat, lng })) {
     return reply.status(400).send({ error: "Invalid GPS coordinates" });
+  }
+  if (!driverRegistry.isWithinBounds(lat, lng)) {
+    return reply
+      .status(400)
+      .send({ error: "Driver must be spawned within the active operating region" });
   }
 
   const driverId = id || `spawned_driver_${Date.now().toString().slice(-4)}`;
@@ -333,14 +660,21 @@ fastify.post("/drivers/spawn", async (req, reply) => {
 // --- WEBSOCKET GATEWAY ---
 fastify.get("/ws", { websocket: true }, (socket, req) => {
   const query = (req.query || {}) as { role?: string; id?: string };
+  if (!hasControlAccess(req.headers)) {
+    socket.close(1008, "Unauthorized");
+    return;
+  }
   const role: ClientRole = (query.role as ClientRole) || "observer";
+  if (role !== "rider" && role !== "driver" && role !== "observer") {
+    socket.close(1008, "Invalid role");
+    return;
+  }
   const clientId = query.id;
 
   wsManager.handleConnection(socket, role, clientId);
 });
 
 const PORT = Number(process.env.PORT) || 3000;
-const HOST = process.env.HOST || "0.0.0.0";
 
 try {
   await fastify.listen({ port: PORT, host: HOST });

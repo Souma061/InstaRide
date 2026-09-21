@@ -15,6 +15,7 @@
     "test:state-machine": "tsx tests/test_trip_state_machine.ts",
     "test:matching": "tsx tests/test_matching_service.ts",
     "test:audit": "tsx tests/test_audit_fixes.ts",
+    "test:integration": "tsx tests/test_integration_edge_cases.ts",
     "dev:frontend": "vite frontend",
     "build:frontend": "vite build frontend",
     "preview:frontend": "vite preview frontend"
