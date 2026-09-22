@@ -1,8 +1,11 @@
 import { GeoBounds, QuadTree } from "../src/spatial/quadtree.js";
 
-function getMemoryUsageMB(): number {
+function getMemoryUsageMB(): { heapMB: number; rssMB: number } {
   const usage = process.memoryUsage();
-  return Math.round(usage.heapUsed / (1024 * 1024));
+  return {
+    heapMB: Math.round(usage.heapUsed / (1024 * 1024)),
+    rssMB: Math.round(usage.rss / (1024 * 1024)),
+  };
 }
 
 function runTypeScript1MBenchmark() {
@@ -48,7 +51,7 @@ function runTypeScript1MBenchmark() {
     `  -> Insertion Throughput: ${(NUM_DRIVERS / (insertMs / 1000)).toFixed(2)} inserts/sec`,
   );
   console.log(
-    `  -> V8 Heap Memory for 1M entities: ~${memAfter - memBefore} MB (Total Heap: ${memAfter} MB)\n`,
+    `  -> Memory Footprint: V8 Heap: ${memAfter.heapMB} MB (+${memAfter.heapMB - memBefore.heapMB} MB) | RSS: ${memAfter.rssMB} MB\n`,
   );
 
   // 2. Telemetry Updates
@@ -75,12 +78,14 @@ function runTypeScript1MBenchmark() {
     `  -> Update Throughput: ${(NUM_UPDATES / (updateMs / 1000)).toFixed(2)} updates/sec\n`,
   );
 
-  // 3. k-NN Search
+  // 3. k-NN Search with Latency Percentiles (p50, p95, p99)
   console.log(
     `[3/3] Running ${NUM_QUERIES} spatial searches (k=${K}) on 1M drivers...`,
   );
-  const t4 = performance.now();
+  const queryLatenciesUs = new Float64Array(NUM_QUERIES);
   let totalFound = 0;
+
+  const t4 = performance.now();
   for (let i = 0; i < NUM_QUERIES; i++) {
     const queryLat =
       cityBounds.minLat +
@@ -88,16 +93,26 @@ function runTypeScript1MBenchmark() {
     const queryLng =
       cityBounds.minLng +
       Math.random() * (cityBounds.maxLng - cityBounds.minLng);
+    const q0 = performance.now();
     const results = tree.kNearestNeighbors(queryLat, queryLng, K, 50000.0);
+    const q1 = performance.now();
+    queryLatenciesUs[i] = (q1 - q0) * 1000;
     totalFound += results.length;
   }
   const t5 = performance.now();
   const queryMs = t5 - t4;
+
+  queryLatenciesUs.sort();
+  const p50 = queryLatenciesUs[Math.floor(NUM_QUERIES * 0.5)];
+  const p95 = queryLatenciesUs[Math.floor(NUM_QUERIES * 0.95)];
+  const p99 = queryLatenciesUs[Math.floor(NUM_QUERIES * 0.99)];
+  const avgUs = (queryMs * 1000) / NUM_QUERIES;
+
   console.log(
     `  -> ${NUM_QUERIES} queries completed in: ${queryMs.toFixed(2)} ms`,
   );
   console.log(
-    `  -> Average Latency per Query: ${((queryMs * 1000) / NUM_QUERIES).toFixed(2)} microseconds (us)`,
+    `  -> Query Latency: Avg: ${avgUs.toFixed(2)} μs | p50: ${p50.toFixed(2)} μs | p95: ${p95.toFixed(2)} μs | p99: ${p99.toFixed(2)} μs`,
   );
   console.log(
     `  -> Query Throughput: ${(NUM_QUERIES / (queryMs / 1000)).toFixed(2)} queries/sec`,

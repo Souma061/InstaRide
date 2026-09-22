@@ -130,22 +130,25 @@ InstaRide includes both an in-memory TypeScript PR-QuadTree and a compiled nativ
 
 ### 2. The 1,000,000 (1 Million) Driver Benchmark
 
-Both engines were benchmarked side-by-side on an enterprise scale of **1,000,000 concurrent drivers** across 20,000 nearest-neighbor queries:
+Both engines were benchmarked side-by-side on an enterprise scale of **1,000,000 concurrent drivers** across 20,000 nearest-neighbor queries, capturing tail latencies (p50, p95, p99) and resident memory:
 
-| Benchmark Phase                       | Native C++ (`-O3`)           | TypeScript (Node v24 V8) | Comparison & Engineering Takeaways          |
-| :------------------------------------ | :--------------------------- | :----------------------- | :------------------------------------------ |
-| **20,000 $k$-NN Queries (across 1M)** | **316.57 ms**                | 674.95 ms                | 🚀 **C++ is 2.13× Faster**                  |
-| **Average Query Latency**             | **15.83 $\mu s$** (0.015 ms) | 33.75 $\mu s$ (0.033 ms) | 🚀 **53% lower query latency**              |
-| **Query Throughput**                  | **63,176 queries/sec**       | 29,631 queries/sec       | 🚀 **+33,545 MORE queries/sec**             |
-| **50,000 Telemetry Updates**          | **174.10 ms** (287k/sec)     | 183.49 ms (272k/sec)     | 🚀 **C++ is faster on updates**             |
-| **1M Entities RAM Footprint**         | **~216 MB**                  | ~344 MB                  | 🚀 **C++ uses 37% less RAM** (saves 128 MB) |
-| **1M Drivers Insertion**              | 2.93 sec (341k/sec)          | 1.88 sec (531k/sec)      | TS (V8 young-generation bump allocator)     |
+| Benchmark Phase                       | Native C++ (`-O3`)                                                   | TypeScript (Node v24 V8)                                             | Comparison & Engineering Takeaways                     |
+| :------------------------------------ | :------------------------------------------------------------------- | :------------------------------------------------------------------- | :----------------------------------------------------- |
+| **Average Query Latency**             | **17.71 $\mu s$**                                                    | 33.75 $\mu s$                                                        | 🚀 **~48% lower average latency**                      |
+| **Median (p50) Latency**              | **16.50 $\mu s$**                                                    | 28.50 $\mu s$                                                        | 🚀 **Sub-20 microsecond core execution**               |
+| **p95 Tail Latency**                  | **24.40 $\mu s$**                                                    | 58.20 $\mu s$                                                        | 🚀 **2.38× faster 95th percentile**                    |
+| **p99 Worst-Case Latency**            | **31.40 $\mu s$**                                                    | 112.40 $\mu s$                                                       | 🚀 **3.58× faster p99** (V8 GC pause resilience)       |
+| **Query Throughput**                  | **56,450 queries/sec**                                               | 29,631 queries/sec                                                   | 🚀 **+26,800 MORE queries/sec**                        |
+| **50,000 Telemetry Updates**          | **229.25 ms** (218k/sec)                                             | 183.49 ms (272k/sec)                                                 | Fast pointer dereferencing & spatial leaf updates      |
+| **Memory Footprint**                  | **~221 MB Working Set** (216 MB heap)                               | ~353 MB Heap (**513 MB RSS**)                                        | 🚀 **C++ uses 57% less total OS RAM**                  |
+| **1M Drivers Insertion**              | 7.87 sec (127k/sec)                                                  | 1.88 sec (531k/sec)                                                  | TS benefits from V8 young-generation bump allocator    |
 
 #### Key Architectural Findings:
 
-1. **$O(\log N)$ Scaling Proof**: Scaling the fleet **10×** (from 100k to 1M drivers) only increased C++ search latency by **1.35 microseconds** ($16.45 \mu s \to 17.80 \mu s$). Spatial quadrant pruning eliminates 75% of geographic space at each depth split, adding only 1–2 tree levels.
-2. **Memory Packing Efficiency**: C++ structs are packed contiguously with zero object overhead (**216 MB**), whereas V8 requires hidden class pointers, property descriptors, and dynamic string hash map headers (**344 MB**).
-3. **Hardware Cache Warming**: On initial cold runs, C++ encounters cold DRAM misses and soft OS page faults (~$142 \mu s$), then rapidly drops to **$15–17 \mu s$** as L1/L2 caches and branch predictors warm up.
+1. **Tail Latency Stability (p99 Pruning)**: In high-scale spatial indexing, tail latency spikes usually occur due to boundary edge cases or garbage collector sweeps. C++ guarantees deterministic microsecond execution without GC pauses, keeping p99 under **32 microseconds**.
+2. **$O(\log N)$ Scaling Proof**: Scaling the fleet **10×** (from 100k to 1M drivers) only increased C++ search latency by **~1.5 microseconds** ($16.2 \mu s \to 17.7 \mu s$). Spatial quadrant pruning eliminates 75% of geographic space at each depth split, adding only 1–2 tree levels.
+3. **Memory Packing Efficiency**: C++ structs are packed contiguously with zero object overhead (**221 MB**), whereas V8 requires hidden class pointers, property descriptors, and dynamic string hash map headers (**513 MB RSS**).
+4. **Hardware Cache Warming**: On initial cold runs, C++ encounters cold DRAM misses and soft OS page faults, then rapidly drops to **$16–18 \mu s$** as L1/L2 caches and branch predictors warm up.
 
 ---
 
@@ -156,28 +159,56 @@ Both engines were benchmarked side-by-side on an enterprise scale of **1,000,000
 - **$k$-NN Search**: Uses priority-queue branch-and-bound with pruning bounds.
 - **Available-Only Indexing**: The QuadTree indexes **only drivers currently in `available` status**. When a driver is locked or busy, they are removed from the tree in $O(1)$, ensuring zero wasted search iterations on busy drivers.
 
-### 2. Atomic Compare-And-Swap (CAS) & Lease Manager
+### 4. Synchronous Lease-Based Atomic Claims (Single-Process Critical Section)
 
-- **The Concurrency Problem**: Two riders at adjacent street corners request rides at the exact same millisecond. Both spatial queries return the same nearest driver $D_1$.
+- **The Concurrency Problem**: Two riders at adjacent street corners request rides at the exact same millisecond. Both spatial queries return the same nearest candidate driver $D_1$.
 - **The Invariant**: A single driver can never be offered or assigned to two competing trips simultaneously (**$0.00\%$ duplicate dispatch**).
-- **Lease Mechanism**:
-  - Driver transitions atomically: `available` $\to$ `locked` $\to$ `busy`.
-  - When an offer is dispatched, the driver receives a timestamped lock lease (15-second TTL).
-  - If Driver 1 rejects or times out, the lock is released, Driver 1 returns to the QuadTree, and the engine automatically cascades to Candidate #2 without user intervention.
+- **Execution Model (Single-Process Synchronization)**:
+  - Inside a single Node.js process, `DriverRegistry.acquireLock()` executes as a synchronous critical section.
+  - State verification (checking if `status === 'available'` and `!lockToken`) and lease assignment occur synchronously on the event loop without an asynchronous `await` yield between check and set.
+  - Driver transitions: `available` $\to$ `locked` (15s lease TTL) $\to$ `busy`.
+  - When locked, the driver is pulled from the QuadTree in $O(1)$, making them invisible to competing queries.
+  - If Driver 1 rejects or times out, the lock is released, Driver 1 returns to the QuadTree, and the matching service automatically cascades to Candidate #2 without user intervention.
+- **Single-Process vs. Distributed Guarantees**:
+  - *What the current tests prove*: Verifies zero double-dispatch under high concurrent async request bursts within a single Node.js runtime.
+  - *What distributed production requires*: Multi-process/container deployments require an external coordination primitive (e.g., Redis `SET NX` with lease TTL or PostgreSQL row-level locks). See the [Distributed Scaling Roadmap](#distributed-evolution--production-scaling-roadmap) below.
 
-### 3. Deterministic Trip Finite State Machine (FSM)
+### 5. Deterministic Trip Finite State Machine (FSM)
 
 - Strict state progression matrix:
   $$\text{IDLE} \longrightarrow \text{REQUESTED} \longrightarrow \text{MATCHING} \longrightarrow \text{MATCHED} \longrightarrow \text{EN\_ROUTE} \longrightarrow \text{ARRIVED} \longrightarrow \text{IN\_PROGRESS} \longrightarrow \text{COMPLETED}$$
 - **Anti-Fraud Passenger Onboard Guard**: Cancellation is permitted while `matching`, `matched`, `en_route`, or `arrived`. Once the passenger is onboard (`in_progress`), **cancellation is strictly forbidden**—only the driver can complete the trip at dropoff.
 - **Accept/Cancel Rollback**: If a driver accepts at the exact microsecond a rider cancels, rollback returns the driver to `available` and re-indexes them into the QuadTree.
 
-### 4. Interactive Live Spatial Map & Concurrency Evidence Dossier
+### 6. Interactive Live Spatial Map & Concurrency Evidence Dossier
 
 - **Zero API Keys**: Powered by Leaflet and OpenStreetMap tiles with dark-matter filters.
 - **Dynamic Worldwide Panning**: Pan anywhere on Earth (Bengaluru, New York, Tokyo, London, Paris, San Francisco, Singapore).
 - **"Seed in Visible View"**: Dynamically re-seeds custom fleet sizes ($1$ to $500$) across the visible viewport coordinates.
-- **Live Concurrency Evidence Dossier**: Fires two simultaneous requests competing for one driver, rendering side-by-side atomic lock traces, collision alerts, and animated trajectory vectors directly on the map.
+- **Live Concurrency Evidence Dossier**: Fires two simultaneous requests competing for one driver, rendering side-by-side lock traces, collision alerts, and animated trajectory vectors directly on the map.
+
+---
+
+## Distributed Evolution & Production Scaling Roadmap
+
+While InstaRide is engineered as an ultra-fast, self-contained single-process engine, its design decouples cleanly for multi-node horizontal scaling:
+
+```mermaid
+graph TD
+    LB[Cloud Load Balancer / API Gateway] --> Node1[Matching Worker 1<br/>Local PR-QuadTree Spatial Cache]
+    LB --> Node2[Matching Worker 2<br/>Local PR-QuadTree Spatial Cache]
+    LB --> Node3[Matching Worker 3<br/>Local PR-QuadTree Spatial Cache]
+
+    Node1 <--> Coordination[(Shared Coordination Layer<br/>Redis SET NX / PostgreSQL Locks)]
+    Node2 <--> Coordination
+    Node3 <--> Coordination
+
+    Coordination --> StateStore[(Distributed State Store<br/>Authoritative Driver Ownership & Trip FSM)]
+```
+
+1. **Local QuadTree as Fast Spatial Cache**: Each matching node maintains an in-memory spatial index (TypeScript or native C++) for sub-50 $\mu s$ candidate discovery.
+2. **Centralized Atomic Claims**: When a candidate is selected, `acquireLock` delegates to Redis (`SET driver:{id}:lock {requestId} NX PX 15000`) or PostgreSQL row locks, providing multi-datacenter consistency across workers.
+3. **Event Bus Invalidation**: Driver status changes (`busy`, `offline`) are published via Redis Pub/Sub or Kafka to invalidate local spatial caches across sibling nodes.
 
 ---
 

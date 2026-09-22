@@ -98,23 +98,45 @@ int main()
     // =========================================================================
     std::cout << "[3/3] Running " << NUM_QUERIES << " spatial searches (k=" << K << ") on 1M drivers...\n";
 
+    std::vector<double> latenciesUs(NUM_QUERIES);
     auto startQuery = std::chrono::high_resolution_clock::now();
 
+#ifdef _WIN32
+    LARGE_INTEGER qpcFreq;
+    QueryPerformanceFrequency(&qpcFreq);
+#endif
     int totalFound = 0;
     for (int i = 0; i < NUM_QUERIES; ++i)
     {
         double queryLat = latDist(rng);
         double queryLng = lngDist(rng);
+#ifdef _WIN32
+        LARGE_INTEGER q0, q1;
+        QueryPerformanceCounter(&q0);
         auto results = tree.KNearestNeighBors(queryLat, queryLng, K, 50000.0);
+        QueryPerformanceCounter(&q1);
+        latenciesUs[i] = ((q1.QuadPart - q0.QuadPart) * 1000000.0) / qpcFreq.QuadPart;
+#else
+        auto q0 = std::chrono::high_resolution_clock::now();
+        auto results = tree.KNearestNeighBors(queryLat, queryLng, K, 50000.0);
+        auto q1 = std::chrono::high_resolution_clock::now();
+        latenciesUs[i] = std::chrono::duration<double, std::micro>(q1 - q0).count();
+#endif
         totalFound += results.size();
     }
 
     auto endQuery = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> queryDuration = endQuery - startQuery;
 
+    std::sort(latenciesUs.begin(), latenciesUs.end());
+    double p50 = latenciesUs[(size_t)(NUM_QUERIES * 0.50)];
+    double p95 = latenciesUs[(size_t)(NUM_QUERIES * 0.95)];
+    double p99 = latenciesUs[(size_t)(NUM_QUERIES * 0.99)];
+    double avgUs = (queryDuration.count() * 1000.0) / NUM_QUERIES;
+
     std::cout << "  -> " << NUM_QUERIES << " queries completed in: " << queryDuration.count() << " ms\n";
-    std::cout << "  -> Average Latency per Query: "
-              << (queryDuration.count() * 1000.0 / NUM_QUERIES) << " microseconds (us)\n";
+    std::cout << "  -> Query Latency: Avg: " << std::fixed << std::setprecision(2) << avgUs
+              << " μs | p50: " << p50 << " μs | p95: " << p95 << " μs | p99: " << p99 << " μs\n";
     std::cout << "  -> Query Throughput: "
               << (NUM_QUERIES / (queryDuration.count() / 1000.0)) << " queries/sec\n";
     std::cout << "  -> Total candidate matches verified: " << totalFound << "\n\n";

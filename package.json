@@ -18,7 +18,10 @@
     "test:integration": "tsx tests/test_integration_edge_cases.ts",
     "dev:frontend": "vite frontend",
     "build:frontend": "vite build frontend",
-    "preview:frontend": "vite preview frontend"
+    "preview:frontend": "vite preview frontend",
+    "build:cpp": "g++ -O3 -std=c++14 cpp-engine/engine_bridge.cpp -o cpp-engine/engine_bridge.exe",
+    "benchmark:1M:cpp": "g++ -O3 -std=c++14 cpp-engine/benchmark_1M.cpp -lpsapi -o cpp-engine/benchmark_1M.exe && cpp-engine\\benchmark_1M.exe",
+    "benchmark:1M:ts": "tsx tests/benchmark_1M_ts.ts"
   },
   "dependencies": {
     "@fastify/static": "^10.1.4",
