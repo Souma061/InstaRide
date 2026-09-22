@@ -1,5 +1,6 @@
 import L from "leaflet";
 import {
+  Cpu,
   Eye,
   Flag,
   Globe2,
@@ -76,6 +77,40 @@ export const DynamicSpatialMap: React.FC<DynamicSpatialMapProps> = ({
   // Custom bounds input state
   const [customBoundsInput, setCustomBoundsInput] =
     useState<GeoBounds>(activeBounds);
+
+  // Engine State & Latency Readout
+  const [engine, setEngine] = useState<"ts" | "cpp">("ts");
+  const [cppAvailable, setCppAvailable] = useState<boolean>(true);
+  const [lastLatencyUs, setLastLatencyUs] = useState<number>(0);
+
+  useEffect(() => {
+    fetch("/api/engine/status")
+      .then((res) => res.json())
+      .then((data) => {
+        if (data && data.activeEngine) {
+          setEngine(data.activeEngine);
+          setCppAvailable(data.cppAvailable ?? true);
+          setLastLatencyUs(data.lastLatencyUs ?? 0);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleSwitchEngine = async (target: "ts" | "cpp") => {
+    try {
+      const res = await fetch("/api/engine/select", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ engine: target }),
+      });
+      const data = await res.json();
+      if (data.status === "ok") {
+        setEngine(target);
+      }
+    } catch (err) {
+      console.error("Failed to switch engine", err);
+    }
+  };
 
   // Initialize Leaflet Map
   useEffect(() => {
@@ -459,6 +494,43 @@ export const DynamicSpatialMap: React.FC<DynamicSpatialMapProps> = ({
           >
             <PlusCircle className="w-3.5 h-3.5 text-cyan-300" />
             <span>Spawn Driver</span>
+          </button>
+        </div>
+
+        {/* Center: Core Engine Switcher (TypeScript V8 vs C++ Native) */}
+        <div className="flex items-center gap-1 bg-[#090d16]/95 backdrop-blur-md border border-border p-1 rounded-xl shadow-xl pointer-events-auto text-xs">
+          <button
+            type="button"
+            onClick={() => handleSwitchEngine("ts")}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-lg font-bold transition ${
+              engine === "ts"
+                ? "bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm"
+                : "text-zinc-400 hover:text-zinc-200"
+            }`}
+            title="Switch to in-memory TypeScript PR-Quadtree (V8 JIT)"
+          >
+            <Zap className="w-3.5 h-3.5 text-amber-400" />
+            <span>⚡ TypeScript</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleSwitchEngine("cpp")}
+            disabled={!cppAvailable}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-lg font-bold transition ${
+              engine === "cpp"
+                ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm"
+                : "text-zinc-400 hover:text-zinc-200"
+            } ${!cppAvailable ? "opacity-40 cursor-not-allowed" : ""}`}
+            title="Switch to native C++ PR-Quadtree compiled with MinGW GCC -O3"
+          >
+            <Cpu className="w-3.5 h-3.5 text-cyan-400" />
+            <span>🚀 C++ Native</span>
+            {engine === "cpp" && lastLatencyUs > 0 && (
+              <span className="ml-1 text-[10px] bg-cyan-950/80 border border-cyan-800 text-cyan-200 px-1.5 py-0.5 rounded-full font-mono font-bold">
+                {lastLatencyUs.toFixed(0)}μs
+              </span>
+            )}
           </button>
         </div>
 

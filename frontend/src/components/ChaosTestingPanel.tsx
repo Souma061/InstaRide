@@ -1,16 +1,5 @@
+import { Flame, RotateCcw, ShieldCheck, Zap } from "lucide-react";
 import React, { useState } from "react";
-import {
-  AlertTriangle,
-  CheckCircle2,
-  ChevronRight,
-  Flame,
-  RotateCcw,
-  ShieldAlert,
-  ShieldCheck,
-  Timer,
-  XCircle,
-  Zap,
-} from "lucide-react";
 import { ConcurrencyRaceResult } from "../types";
 
 interface ChaosTestingPanelProps {
@@ -53,7 +42,8 @@ export const ChaosTestingPanel: React.FC<ChaosTestingPanelProps> = ({
       </div>
 
       <p className="text-xs text-zinc-400">
-        Run real-time race conditions, atomic lock stress tests, and automated fallback loops directly against the backend engine:
+        Run real-time race conditions, atomic lock stress tests, and automated
+        fallback loops directly against the backend engine:
       </p>
 
       {/* Scenario Controls */}
@@ -66,7 +56,8 @@ export const ChaosTestingPanel: React.FC<ChaosTestingPanelProps> = ({
               <span>2-Rider Concurrency Race</span>
             </div>
             <p className="text-[11px] text-zinc-400">
-              Simultaneously fires 2 competing ride requests targeting the exact same closest driver to prove 0% duplicate assignment.
+              Simultaneously fires 2 competing ride requests targeting the exact
+              same closest driver to prove 0% duplicate assignment.
             </p>
           </div>
           <button
@@ -75,7 +66,9 @@ export const ChaosTestingPanel: React.FC<ChaosTestingPanelProps> = ({
             className="w-full mt-2 py-2 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 font-semibold text-xs rounded-lg transition active:scale-95 flex items-center justify-center gap-1.5 disabled:opacity-50"
           >
             <Zap className={`w-3.5 h-3.5 ${isRunning ? "animate-spin" : ""}`} />
-            <span>{isRunning ? "Simulating Race..." : "Launch Concurrent Race"}</span>
+            <span>
+              {isRunning ? "Simulating Race..." : "Launch Concurrent Race"}
+            </span>
           </button>
         </div>
 
@@ -87,7 +80,8 @@ export const ChaosTestingPanel: React.FC<ChaosTestingPanelProps> = ({
               <span>Reseed Fleet</span>
             </div>
             <p className="text-[11px] text-zinc-400">
-              Restores all virtual drivers back to available state and re-indexes them across the active region's PR-Quadtree.
+              Restores all virtual drivers back to available state and
+              re-indexes them across the active region's PR-Quadtree.
             </p>
           </div>
           <button
@@ -123,12 +117,14 @@ export const ChaosTestingPanel: React.FC<ChaosTestingPanelProps> = ({
           {/* Contended Driver Callout */}
           <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-2.5 text-xs text-amber-200 flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <span className="text-amber-400 font-bold">⚡ Contended Target:</span>
+              <span className="text-amber-400 font-bold">
+                ⚡ Contended Target:
+              </span>
               <span className="font-mono font-bold bg-zinc-900/90 text-amber-300 px-2 py-0.5 rounded border border-amber-500/30">
                 {raceResult.targetContendedDriverId}
               </span>
               <span className="text-[11px] text-zinc-400">
-                (Closest $k$-NN neighbor for both Alice & Bob)
+                (Closest k-NN neighbor for both Alice & Bob)
               </span>
             </div>
             <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-bold">
@@ -163,7 +159,9 @@ export const ChaosTestingPanel: React.FC<ChaosTestingPanelProps> = ({
                   </span>
                 </div>
                 <div className="flex items-center justify-between pt-1 border-t border-zinc-800">
-                  <span className="text-zinc-400 font-semibold">Assigned Driver:</span>
+                  <span className="text-zinc-400 font-semibold">
+                    Assigned Driver:
+                  </span>
                   <span className="font-mono text-purple-300 font-bold text-xs bg-purple-950/60 px-2 py-0.5 rounded border border-purple-500/30">
                     {raceResult.alice.assignedDriverId}
                   </span>
@@ -196,7 +194,9 @@ export const ChaosTestingPanel: React.FC<ChaosTestingPanelProps> = ({
                   </span>
                 </div>
                 <div className="flex items-center justify-between pt-1 border-t border-zinc-800">
-                  <span className="text-zinc-400 font-semibold">Assigned Driver:</span>
+                  <span className="text-zinc-400 font-semibold">
+                    Assigned Driver:
+                  </span>
                   <span className="font-mono text-orange-300 font-bold text-xs bg-orange-950/60 px-2 py-0.5 rounded border border-orange-500/30">
                     {raceResult.bob.assignedDriverId}
                   </span>
@@ -223,6 +223,19 @@ export const ChaosTestingPanel: React.FC<ChaosTestingPanelProps> = ({
                 Deterministic Next-Candidate Cascade
               </span>
             </div>
+            {(raceResult.metrics as any)?.engineUsed && (
+              <div className="text-[11px] font-mono text-zinc-400 flex items-center justify-between pt-1 border-t border-zinc-800/80">
+                <span>Spatial Match Engine:</span>
+                <span className="text-amber-400 font-bold flex items-center gap-1.5">
+                  {(raceResult.metrics as any).engineUsed}
+                  {(raceResult.metrics as any).queryLatencyUs !== undefined && (
+                    <span className="text-cyan-300 font-mono text-[10px] bg-cyan-950 px-1.5 py-0.5 rounded border border-cyan-800">
+                      {(raceResult.metrics as any).queryLatencyUs} μs
+                    </span>
+                  )}
+                </span>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -237,19 +250,25 @@ export const ChaosTestingPanel: React.FC<ChaosTestingPanelProps> = ({
           <li className="flex items-start gap-1.5">
             <span className="text-emerald-400 font-bold">✓</span>
             <span>
-              <strong className="text-zinc-200">Atomic CAS Locking:</strong> Driver is pulled from the Quadtree in O(1) upon match offer, making them invisible to competing queries.
+              <strong className="text-zinc-200">Atomic CAS Locking:</strong>{" "}
+              Driver is pulled from the Quadtree in O(1) upon match offer,
+              making them invisible to competing queries.
             </span>
           </li>
           <li className="flex items-start gap-1.5">
             <span className="text-emerald-400 font-bold">✓</span>
             <span>
-              <strong className="text-zinc-200">Accept/Cancel Rollback:</strong> If a driver accepts right as a rider cancels, rollback returns the driver to available and re-indexes into Quadtree.
+              <strong className="text-zinc-200">Accept/Cancel Rollback:</strong>{" "}
+              If a driver accepts right as a rider cancels, rollback returns the
+              driver to available and re-indexes into Quadtree.
             </span>
           </li>
           <li className="flex items-start gap-1.5">
             <span className="text-emerald-400 font-bold">✓</span>
             <span>
-              <strong className="text-zinc-200">15s Deadman Switch:</strong> Unresponsive drivers automatically timeout, returning to available and cascading the offer to candidate #2.
+              <strong className="text-zinc-200">15s Deadman Switch:</strong>{" "}
+              Unresponsive drivers automatically timeout, returning to available
+              and cascading the offer to candidate #2.
             </span>
           </li>
         </ul>

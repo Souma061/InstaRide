@@ -9,7 +9,8 @@ import { MatchingService } from "./core/matching_service.js";
 import { TripStateMachine } from "./core/trip_state_machine.js";
 import { ClientRole, WsManager } from "./gateway/ws_manager.js";
 import { DriverSimulator } from "./simulation/driver_simulator.js";
-import { GeoBounds, QuadTree } from "./spatial/quadtree.js";
+import { CppSpatialBridge } from "./spatial/cpp_spatial_bridge.js";
+import { CandidateDriver, GeoBounds, QuadTree } from "./spatial/quadtree.js";
 import {
   clampTimeout,
   isValidGeoBounds,
@@ -43,7 +44,9 @@ if (!isLoopbackHost && !CONTROL_API_TOKEN) {
 function hasControlAccess(
   headers: Record<string, string | string[] | undefined>,
 ): boolean {
-  return isLoopbackHost || headers.authorization === `Bearer ${CONTROL_API_TOKEN}`;
+  return (
+    isLoopbackHost || headers.authorization === `Bearer ${CONTROL_API_TOKEN}`
+  );
 }
 
 const fastify = Fastify({
@@ -99,7 +102,29 @@ wsManager.setMatchingService(matchingService);
 // 3. Initialize & Start Virtual Driver Simulation
 simulator = new DriverSimulator(activeBounds, driverRegistry, stateMachine);
 simulator.setMatchingService(matchingService);
+
+// 3b. Initialize Native C++ Spatial Bridge
+const cppBridge = new CppSpatialBridge();
+let activeEngine: "ts" | "cpp" = "ts";
+
+cppBridge.start().then((ok) => {
+  if (ok) {
+    cppBridge.initRegion(activeBounds, 8, 7);
+    for (const d of simulator.getAllVirtualDrivers()) {
+      cppBridge.insert(d.id, d.lat, d.lng);
+    }
+    console.log(
+      "🚀 [Server] C++ Native Spatial Accelerator connected & ready!",
+    );
+  }
+});
+
 simulator.onTelemetryTick = (updates) => {
+  if (cppBridge.isAvailable()) {
+    for (const u of updates) {
+      cppBridge.update(u.id, u.lat, u.lng);
+    }
+  }
   wsManager.broadcastToObservers({
     type: "telemetry_batch",
     drivers: updates,
@@ -204,6 +229,13 @@ fastify.post("/simulator/reset", async (req, reply) => {
   driverRegistry.reset(spatialIndex);
   simulator.resetRegion(activeBounds, count);
 
+  if (cppBridge.isAvailable()) {
+    cppBridge.initRegion(activeBounds, 8, 7);
+    for (const d of simulator.getAllVirtualDrivers()) {
+      cppBridge.insert(d.id, d.lat, d.lng);
+    }
+  }
+
   wsManager.broadcastToObservers({
     type: "region_updated",
     cityName: activeCityName,
@@ -218,6 +250,35 @@ fastify.post("/simulator/reset", async (req, reply) => {
     totalDrivers: count,
     quadtreeSize: spatialIndex.size(),
   };
+});
+
+// Engine Status & Selection Endpoints
+fastify.get("/api/engine/status", async () => {
+  return {
+    activeEngine,
+    cppAvailable: cppBridge.isAvailable(),
+    lastLatencyUs: cppBridge.getLastLatencyUs(),
+    totalQueries: cppBridge.getTotalQueries(),
+  };
+});
+
+fastify.post("/api/engine/select", async (req, reply) => {
+  const body = (req.body || {}) as { engine?: "ts" | "cpp" };
+  if (body.engine !== "ts" && body.engine !== "cpp") {
+    return reply.status(400).send({ error: "engine must be 'ts' or 'cpp'" });
+  }
+  if (body.engine === "cpp" && !cppBridge.isAvailable()) {
+    return reply
+      .status(503)
+      .send({ error: "C++ native engine is not running" });
+  }
+  activeEngine = body.engine;
+  wsManager.broadcastToObservers({
+    type: "engine_changed",
+    activeEngine,
+    latencyUs: cppBridge.getLastLatencyUs(),
+  });
+  return { status: "ok", activeEngine };
 });
 
 // Concurrency Race Simulation with full cryptographic & CAS evidence tracking
@@ -236,18 +297,33 @@ fastify.post("/simulator/concurrency-race", async (req, reply) => {
       : (activeBounds.minLng + activeBounds.maxLng) / 2;
 
   if (!driverRegistry.isWithinBounds(centerLat, centerLng)) {
-    return reply
-      .status(400)
-      .send({ error: "Race center must be within the active operating region" });
+    return reply.status(400).send({
+      error: "Race center must be within the active operating region",
+    });
   }
 
-  // Find nearest available drivers near center
-  let candidates = driverRegistry.findNearbyCandidates(
-    centerLat,
-    centerLng,
-    10,
-    50000,
-  );
+  // Find nearest available drivers near center using active engine
+  let candidates: CandidateDriver[];
+  let queryLatencyUs = 0;
+  if (activeEngine === "cpp" && cppBridge.isAvailable()) {
+    const res = await cppBridge.kNearestNeighbors(
+      centerLat,
+      centerLng,
+      10,
+      50000,
+    );
+    candidates = res.candidates;
+    queryLatencyUs = res.latencyUs;
+  } else {
+    const t0 = performance.now();
+    candidates = driverRegistry.findNearbyCandidates(
+      centerLat,
+      centerLng,
+      10,
+      50000,
+    );
+    queryLatencyUs = (performance.now() - t0) * 1000;
+  }
 
   // If fewer than 2 drivers exist in the area (e.g. fresh region), auto-seed Prime & Backup drivers
   if (candidates.length < 2) {
@@ -436,6 +512,9 @@ fastify.post("/simulator/concurrency-race", async (req, reply) => {
       duplicateRatePercent: 0,
       casCollisionsResolved: 1,
       isolationVerified: aliceAssigned !== bobAssigned,
+      engineUsed:
+        activeEngine === "cpp" ? "C++ Native (-O3)" : "TypeScript (V8 JIT)",
+      queryLatencyUs: Number(queryLatencyUs.toFixed(1)),
     },
   };
 
@@ -537,7 +616,9 @@ fastify.post("/rides/:tripId/cancel", async (req, reply) => {
   }
 
   if (!body.riderId || body.riderId !== trip.riderId) {
-    return reply.status(403).send({ error: "Only the trip's rider may cancel it" });
+    return reply
+      .status(403)
+      .send({ error: "Only the trip's rider may cancel it" });
   }
 
   const result = matchingService.cancelRide(
@@ -628,9 +709,9 @@ fastify.post("/drivers/spawn", async (req, reply) => {
     return reply.status(400).send({ error: "Invalid GPS coordinates" });
   }
   if (!driverRegistry.isWithinBounds(lat, lng)) {
-    return reply
-      .status(400)
-      .send({ error: "Driver must be spawned within the active operating region" });
+    return reply.status(400).send({
+      error: "Driver must be spawned within the active operating region",
+    });
   }
 
   const driverId = id || `spawned_driver_${Date.now().toString().slice(-4)}`;
