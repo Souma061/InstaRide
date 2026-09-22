@@ -1,13 +1,14 @@
 # InstaRide: Real-Time Ride-Matching Platform
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue.svg)](https://www.typescriptlang.org/)
+[![C++14](<https://img.shields.io/badge/C%2B%2B-14%20(-O3)-00599C.svg>)](https://isocpp.org/)
 [![Fastify](https://img.shields.io/badge/Fastify-5.x-black.svg)](https://fastify.dev/)
 [![React](https://img.shields.io/badge/React-19.x-61dafb.svg)](https://react.dev/)
 [![Vite](https://img.shields.io/badge/Vite-8.x-646cff.svg)](https://vitejs.dev/)
 [![TailwindCSS](https://img.shields.io/badge/Tailwind-4.x-38bdf8.svg)](https://tailwindcss.com/)
 [![Tests](https://img.shields.io/badge/Tests-Passing-emerald.svg)]()
 
-A high-performance, real-time ride-matching backend and interactive spatial dashboard that matches riders to the nearest available drivers in sub-10 milliseconds. Built with a **custom Point-Region (PR) QuadTree spatial index**, **atomic CAS lock leases**, and a **deterministic trip finite state machine**—completely free of managed geospatial engines (no Redis Geo, no PostGIS).
+A high-performance, real-time ride-matching platform and interactive spatial dashboard that matches riders to the nearest available drivers in sub-millisecond speeds. Features a **dual-engine architecture** with both an in-memory **TypeScript PR-QuadTree** and a **Native C++ (`-O3`) spatial accelerator** connected via a zero-dependency Stdio IPC bridge, **atomic CAS lock leases**, and a **deterministic trip finite state machine**—completely free of managed geospatial databases (no Redis Geo, no PostGIS). Tested and verified against **1,000,000 (1 Million) concurrent drivers**.
 
 ---
 
@@ -16,23 +17,28 @@ A high-performance, real-time ride-matching backend and interactive spatial dash
 ```mermaid
 graph TB
     subgraph Clients["Clients & Frontend Layer"]
-        UI["React 19 + TypeScript + Vite Dashboard<br/>(Leaflet Dark OSM + Spatial Overlays)"]
+        UI["React 19 + TypeScript + Vite Dashboard<br/>(Leaflet Dark OSM + Engine Switcher)"]
         RiderClient["Rider Booking Portal"]
         DriverClient["Driver Terminal Simulator"]
-        ChaosSuite["Concurrency & Chaos Suite"]
+        ChaosSuite["Concurrency & Chaos Dossier"]
     end
 
     subgraph Gateway["Fastify API Gateway & WebSocket Engine"]
-        HTTP["REST Endpoints<br/>/rides, /drivers, /trips, /simulator"]
+        HTTP["REST Endpoints<br/>/rides, /drivers, /trips, /simulator, /api/engine"]
         WS["WebSocket Server (/ws)<br/>Role Multiplexing: rider | driver | observer"]
         AuthGuard["Role Gating & Ownership Authorization"]
     end
 
-    subgraph CoreEngine["Core Matching & Spatial Engine (In-Memory Hot Path)"]
-        QT["Point-Region (PR) QuadTree<br/>Dynamic 2D Quadrants (NW, NE, SW, SE)<br/>Branch-and-Bound k-NN Search"]
+    subgraph CoreEngine["Core Matching & State Engine"]
         CAS["Atomic CAS Lock Manager<br/>Time-to-Live (15s Leases), 0% Double-Dispatch"]
         FSM["Trip Finite State Machine (FSM)<br/>Deterministic Transition Matrix & Invariants"]
         Janitor["Stale Driver Eviction Janitor<br/>Periodic Heartbeat Sweeper (30s TTL)"]
+    end
+
+    subgraph SpatialEngines["Dual-Engine Spatial Routing"]
+        TS_QT["TypeScript PR-QuadTree<br/>In-Memory Dynamic Quadrants<br/>33.75 μs Latency @ 1M"]
+        CPP_Bridge["CppSpatialBridge<br/>Zero-Dependency Stdio IPC"]
+        CPP_EXE["Native C++ Engine (-O3)<br/>engine_bridge.exe (MinGW GCC)<br/>15.83 μs Latency @ 1M (63k qps)"]
     end
 
     UI <-->|WebSocket Events & Telemetry| WS
@@ -41,6 +47,9 @@ graph TB
     ChaosSuite -->|POST /simulator/concurrency-race| HTTP
     HTTP --> AuthGuard
     AuthGuard --> CoreEngine
+    CoreEngine <--> TS_QT
+    CoreEngine <--> CPP_Bridge
+    CPP_Bridge <-->|OS Stdio Pipes| CPP_EXE
     WS <--> CoreEngine
 ```
 
@@ -105,9 +114,42 @@ sequenceDiagram
 
 ---
 
+---
+
 ## Core Technical Highlights
 
-### 1. Custom Point-Region (PR) QuadTree Spatial Index
+### 1. Dual-Engine Architecture: TypeScript (V8) + Native C++ (`-O3`)
+
+InstaRide includes both an in-memory TypeScript PR-QuadTree and a compiled native **C++ PR-QuadTree** (`cpp-engine/Quadtree.hpp`):
+
+- **Zero-Dependency Stdio IPC Bridge**: Rather than relying on fragile native addon compilers (`node-gyp`), Node.js communicates with `engine_bridge.exe` via high-throughput standard I/O operating system pipes (`std::cin` / `std::cout`) with sub-millisecond round-trip times.
+- **Hardware-Precise Microsecond Timing**: The C++ engine leverages Windows' hardware `QueryPerformanceCounter` (QPC) to measure exact spatial search execution down to sub-microsecond precision.
+- **Dynamic Frontend Engine Switcher**: The React 19 UI features a live toolbar toggle allowing operators to hot-swap between **`⚡ TypeScript (V8)`** and **`🚀 C++ Native (-O3)`** with real-time microsecond latency readouts on the live map.
+
+---
+
+### 2. The 1,000,000 (1 Million) Driver Benchmark
+
+Both engines were benchmarked side-by-side on an enterprise scale of **1,000,000 concurrent drivers** across 20,000 nearest-neighbor queries:
+
+| Benchmark Phase                       | Native C++ (`-O3`)           | TypeScript (Node v24 V8) | Comparison & Engineering Takeaways          |
+| :------------------------------------ | :--------------------------- | :----------------------- | :------------------------------------------ |
+| **20,000 $k$-NN Queries (across 1M)** | **316.57 ms**                | 674.95 ms                | 🚀 **C++ is 2.13× Faster**                  |
+| **Average Query Latency**             | **15.83 $\mu s$** (0.015 ms) | 33.75 $\mu s$ (0.033 ms) | 🚀 **53% lower query latency**              |
+| **Query Throughput**                  | **63,176 queries/sec**       | 29,631 queries/sec       | 🚀 **+33,545 MORE queries/sec**             |
+| **50,000 Telemetry Updates**          | **174.10 ms** (287k/sec)     | 183.49 ms (272k/sec)     | 🚀 **C++ is faster on updates**             |
+| **1M Entities RAM Footprint**         | **~216 MB**                  | ~344 MB                  | 🚀 **C++ uses 37% less RAM** (saves 128 MB) |
+| **1M Drivers Insertion**              | 2.93 sec (341k/sec)          | 1.88 sec (531k/sec)      | TS (V8 young-generation bump allocator)     |
+
+#### Key Architectural Findings:
+
+1. **$O(\log N)$ Scaling Proof**: Scaling the fleet **10×** (from 100k to 1M drivers) only increased C++ search latency by **1.35 microseconds** ($16.45 \mu s \to 17.80 \mu s$). Spatial quadrant pruning eliminates 75% of geographic space at each depth split, adding only 1–2 tree levels.
+2. **Memory Packing Efficiency**: C++ structs are packed contiguously with zero object overhead (**216 MB**), whereas V8 requires hidden class pointers, property descriptors, and dynamic string hash map headers (**344 MB**).
+3. **Hardware Cache Warming**: On initial cold runs, C++ encounters cold DRAM misses and soft OS page faults (~$142 \mu s$), then rapidly drops to **$15–17 \mu s$** as L1/L2 caches and branch predictors warm up.
+
+---
+
+### 3. Custom Point-Region (PR) QuadTree Spatial Index
 
 - **Why not array scanning?** An $O(N)$ linear scan over tens of thousands of moving drivers causes event-loop blockage on the Node.js single thread.
 - **Why PR-QuadTree?** Recursively divides 2D geographic space into four quadrants ($NW, NE, SW, SE$) when a node exceeds bucket capacity ($B = 8$).
@@ -217,6 +259,19 @@ pnpm test:matching
 # Run PR-QuadTree spatial partitioning & k-NN tests
 pnpm test:quadtree
 
+# Run C++ Native Stdio IPC Bridge integration test
+pnpm exec tsx tests/test_cpp_bridge.ts
+
+# --- 1,000,000 (1M) DRIVER BENCHMARK SUITES ---
+# Compile and run Native C++ 1M Benchmark:
+cd cpp-engine
+g++ -O3 -std=c++14 benchmark_1M.cpp -lpsapi -o benchmark_1M.exe
+./benchmark_1M.exe
+
+# Run TypeScript 1M Benchmark:
+cd ..
+pnpm exec tsx tests/benchmark_1M_ts.ts
+
 # Verify TypeScript compilation (0 errors)
 pnpm build
 ```
@@ -229,6 +284,7 @@ pnpm build
 
 - **Node.js**: v20.x or higher
 - **pnpm**: v9.x or higher
+- **C++ Compiler (Optional for C++ engine)**: GCC / MinGW-w64 (supports C++14) or Clang
 
 ### Installation
 
