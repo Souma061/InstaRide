@@ -1,219 +1,205 @@
-# InstaRide: Master Architecture, System Design & Technical Roadmap
+# InstaRide: System Architecture, Telemetry, and Future Possibilities
 
-This living document consolidates all core architectural foundations, mathematical proofs, system trade-offs, pricing models, and future expansion possibilities for the **InstaRide Real-Time Spatial Matching Platform**.
-
----
-
-## Table of Contents
-
-1. [Core Engine (Implemented Architecture)](#1-core-engine-implemented-architecture)
-2. [Spatial Indexing & Geometric Proofs](#2-spatial-indexing--geometric-proofs)
-3. [Multi-Region & Geographic Scalability](#3-multi-region--geographic-scalability)
-4. [Graph Road Network & Routing Engine](#4-graph-road-network--routing-engine)
-5. [Fare Calculation & Dynamic Route Economics](#5-fare-calculation--dynamic-route-economics)
-6. [Dispatch Optimization (Greedy vs. Batch Matching)](#6-dispatch-optimization-greedy-vs-batch-matching)
-7. [Fault Tolerance, Edge Cases & Concurrency](#7-fault-tolerance-edge-cases--concurrency)
-8. [GPS Telemetry & High-Frame-Rate Visualization](#8-gps-telemetry--high-frame-rate-visualization)
-9. [Living Backlog & Future Possibilities](#9-living-backlog--future-possibilities)
+This document captures the in-depth architectural analysis, real-time telemetry design, multithreading concurrency hazards, and production scaling possibilities for the InstaRide platform.
 
 ---
 
-## 1. Core Engine (Implemented Architecture)
+## 1. Dynamic Interval Location Telemetry (Moving from Static to Real-Time Streaming)
 
-The system is built around an in-memory, zero-disk-I/O hot path executing in sub-millisecond latency:
+### 1.1 The Core Problem
+
+In a static architecture, driver locations are treated as fixed coordinates or point-in-time snapshots. However, in a real-world ride-hailing network (Uber, Lyft, Grab), hundreds of thousands of vehicles move continuously across road networks. Naive implementations face four critical problems:
+
+1. **Visual Jumping / Teleportation**: If GPS pings arrive every 3–5 seconds and coordinates are updated directly on the map, vehicle markers snap awkwardly across screens instead of moving smoothly.
+2. **Network & Connection Overhead**: Sending periodic HTTP POST requests incurs repeated TCP/TLS handshakes and bulky HTTP headers (~800 bytes per request) for a payload of only ~60 bytes.
+3. **Battery & Data Drain**: Mobile devices polling or pushing GPS updates at fixed high frequencies drain driver smartphone batteries rapidly.
+4. **GPS Noise & Multipath Jitter**: Smartphone GPS chips oscillate by $\pm 3\text{ to }10\text{ meters}$ even when stationary at traffic lights, triggering false spatial index re-indexing.
+
+---
+
+### 1.2 The Production Ingestion & Interval Pipeline
 
 ```
-[ Rider Request ] ────────► [ Fastify Gateway (HTTP / WebSockets) ]
-                                            │
-                                            ▼
-                                [ MatchingService ]
-                                            │
-                     ┌──────────────────────┴──────────────────────┐
-                     ▼                                             ▼
-          [ DriverRegistry ]                              [ TripStateMachine ]
-     - Available-Only Invariant                      - Deterministic 8-State Matrix
-     - Atomic CAS Lock Lease (15s TTL)               - Role Authorization Guards
-     - O(1) Leaf-Cached Quadtree                     - Rematch on Driver Breakdown
+[Driver Mobile Device]
+       │  (Compact JSON/Protobuf frame over persistent WebSocket)
+       ▼
+[WebSocket Ingress Gateway (WsManager)]
+       │  (Deadband filter: ignore Δ < 5m; Velocity guard: reject > 150 km/h)
+       ▼
+[DriverRegistry & Spatial Engine]
+       ├── If inside same QuadTree leaf: O(1) in-place coordinate update
+       └── If crossed quadrant boundary: O(log N) leaf removal & re-insertion
+       │
+       ▼
+[Event Dispatch & Broadcast]
+       ├── Assigned Driver: Streamed 1-to-1 directly to the matched Rider's WebSocket
+       └── Available Fleet: Aggregated and broadcast to Map Observers at throttled rate (1–2 Hz)
+       │
+       ▼
+[Frontend Consumer / Rider Map]
+       └── Dead Reckoning (Linear Interpolation `lerp`) to glide vehicles smoothly at 60 FPS
 ```
 
-### The Invariants
-
-1. **Available-Only Spatial Invariant**: The spatial index contains _exclusively_ available drivers. The moment an atomic lock is acquired, the driver is evicted from the Quadtree to prevent competing riders from even discovering them.
-2. **Event-Loop CAS Atomicity**: By executing `acquireLock()` synchronously without `await` pauses on the Node.js event loop, lock claims are atomic, guaranteeing **0% double-dispatch** under thousands of concurrent requests.
-3. **15-Second Offer Lease Loop**: Each candidate receives an exclusive 15-second offer window. Rejection or timeout immediately releases the lock back to the Quadtree and falls back to candidate #2.
-
 ---
 
-## 2. Spatial Indexing & Geometric Proofs
+### 1.3 Key Architectural Solutions
 
-### 2.1 The Point-Region Quadtree with Leaf Caching
+#### A. Persistent WebSocket Ingress with Compact Frames
 
-- **Dual-Heap Branch & Bound**: Prunes spatial quadrants using `minDistanceToBox()` before computing expensive Haversine distances.
-- **Leaf Caching ($0.17\,\mu\text{s}$)**: Direct node pointer storage (`driverLeaves.get(driverId)`) turns 90% of GPS updates into $O(1)$ in-place mutations instead of $O(\log N)$ root-down re-traversals.
+Telemetry is streamed over persistent WebSockets using minimal payloads:
 
-### 2.2 Why `maxDepth = 7` (Preventing Airport Cluster Degeneracy)
-
-Every division halves the bounding box ($2^D$). In a $15\,\text{km}$ city:
-
-|    Depth ($D$)    |                Physical Cell Size                |         Real-World Scale          |
-| :---------------: | :----------------------------------------------: | :-------------------------------: |
-|      $D = 0$      |       $15\,\text{km} \times 15\,\text{km}$       |            Entire City            |
-|      $D = 3$      |      $1.8\,\text{km} \times 1.8\,\text{km}$      |           Neighborhood            |
-|      $D = 5$      |       $460\,\text{m} \times 460\,\text{m}$       |         A few city blocks         |
-| **$D = 7$ (Cap)** | **$\approx 115\,\text{m} \times 115\,\text{m}$** | **City Block / Airport Taxi Lot** |
-|     $D = 15$      |   $\approx 45\,\text{cm} \times 45\,\text{cm}$   |        Steering wheel size        |
-|     $D = 20$      |  $\approx 1.4\,\text{cm} \times 1.4\,\text{cm}$  | Coin size (Stack Overflow hazard) |
-
-**The Golden Rule**:
-
-> Beyond ~100m, flat in-memory array scans across contiguous CPU L1 cache take $< 1\,\mu\text{s}$, beating 15 levels of nested object pointers. Capping at `maxDepth = 7` prevents infinite recursion when 200 drivers idle in the same parking lot.
-
-### 2.3 The Geometric Proof: Why Only Triangles, Squares, and Hexagons Tile a Plane
-
-To tile a 2D plane without gaps or overlapping, vertex interior angles must divide $360^\circ$ evenly:
-$$\theta = \frac{(n - 2) \times 180^\circ}{n}$$
-
-- **Triangle ($n=3$)**: $60^\circ \implies 360^\circ / 60^\circ = 6$ (Tiles)
-- **Square ($n=4$)**: $90^\circ \implies 360^\circ / 90^\circ = 4$ (Tiles - Quadtrees)
-- **Hexagon ($n=6$)**: $120^\circ \implies 360^\circ / 120^\circ = 3$ (Tiles - Uber H3)
-- **Octagon ($n=8$)**: $135^\circ \implies 360^\circ / 135^\circ = 2.666\dots$ (**Impossible without leaving $90^\circ$ square gaps**).
-
----
-
-## 3. Multi-Region & Geographic Scalability
-
-The core engine is geographically agnostic. Bounding boxes are abstract configurations:
-
-```typescript
-export interface GeoBounds {
-  minLat: number;
-  maxLat: number;
-  minLng: number;
-  maxLng: number;
+```json
+{
+  "type": "telemetry",
+  "driverId": "d_104",
+  "lat": 12.971598,
+  "lng": 77.594562,
+  "bearing": 182.4,
+  "speed": 38.5,
+  "timestamp": 1718000000000
 }
 ```
 
-### Presets Available:
+#### B. Adaptive Telemetry Intervals
 
-- **San Francisco**: `[-122.527, 37.708] to [-122.348, 37.832]`
-- **Kolkata Metro (City Scale)**: `[88.250, 22.450] to [88.480, 22.650]`
-- **West Bengal (Regional Scale)**: `[85.800, 21.500] to [89.900, 27.300]`
-- **All India (National Scale)**: `[68.100, 6.750] to [97.400, 35.500]`
+Rather than fixed-rate transmission, the client app dynamically modulates ping frequency:
 
-### Multi-City Sharding Strategy
+- **Idling / Available Status**: **$10\text{ second}$ interval**. Conserves battery and minimizes network overhead when the driver is stationary or searching for fares.
+- **En Route to Pickup / Active Trip**: **$2–3\text{ second}$ interval**. Provides high-density tracking necessary for turn-by-turn navigation and precise passenger rendezvous.
 
-For national scaling, partition cities into separate Quadtree workers:
+#### C. Two-Tier Spatial Index Updates (Fast-Path Optimization)
 
-```typescript
-const regionalIndexes = new Map<string, QuadTree>([
-  ["kolkata", new QuadTree(KOLKATA_BOUNDS)],
-  ["san_francisco", new QuadTree(SF_BOUNDS)],
-]);
+In the [`DriverRegistry`](file:///d:/MyWorkspace/Projects/RT_Ride_Matching_System/src/core/driver_registry.ts), updating driver telemetry avoids costly full-tree operations:
+
+- **Tier 1 (Fast-Path $O(1)$ In-Place Update)**: The registry caches each driver's current QuadTree leaf node. If the updated coordinate remains within the leaf's geographic bounding box, coordinates are updated in-place without altering tree structure.
+- **Tier 2 (Slow-Path $O(\log N)$ Boundary Crossing)**: Only when the driver crosses quadrant boundaries is the point removed from the old leaf and re-inserted into the new destination quadrant.
+
+#### D. Client-Side Dead Reckoning & Linear Interpolation (`lerp`)
+
+To eliminate vehicle marker snapping between $3\text{s}$ interval ticks, frontend clients interpolate position across animation frames ($60\text{ FPS}$):
+$$P(t) = P_{\text{prev}} + (P_{\text{target}} - P_{\text{prev}}) \times \min\left(1.0, \frac{t - t_0}{T}\right)$$
+The vehicle smoothly glides along its heading vector towards the target position, absorbing network latency jitter.
+
+#### E. Heartbeat Janitor & Stale Eviction
+
+If a driver's cellular connection drops or their battery dies without a clean disconnect:
+
+- The registry janitor sweeps active drivers every $10\text{ seconds}$.
+- If $\text{currentTime} - \text{lastSeen} > 30\text{ seconds}$, the driver is transitioned to `offline` and automatically purged from the QuadTree to prevent dispatching riders to ghost drivers.
+
+---
+
+## 2. Parallel C++ Spatial Query Execution & Multithreading Hazards
+
+### 2.1 Why the Current Architecture is Sequential
+
+The current integration between Node.js and the native C++ engine (`engine_bridge.exe`) relies on standard I/O pipes:
+
+1. **Stdio Line-Buffering**: Node.js sends commands line-by-line over a single `stdin` pipe and waits for responses from `stdout`.
+2. **FIFO Queue Ordering**: `cpp_spatial_bridge.ts` stores pending promises in a single FIFO queue (`this.pendingQueue.shift()`), assuming strict sequential response ordering.
+3. **Single-Threaded C++ Loop**: `engine_bridge.cpp` processes commands inside a blocking `while (std::getline(std::cin, line))` loop on a single OS thread.
+
+Even if Node receives 100 concurrent requests, execution is serialized through one pipe on **one CPU core**.
+
+---
+
+### 2.2 Hazards of Naive Multithreading in Spatial Trees
+
+Attempting to naively make the C++ QuadTree multithreaded (e.g. throwing `std::thread` at queries) introduces severe concurrency bugs:
+
+#### 1. Pointer Invalidation & Segmentation Faults (The "Split" Race)
+
+- A QuadTree dynamically subdivides when points in a leaf exceed bucket capacity ($B = 8$). Subdividing allocates 4 child quadrants (`NW, NE, SW, SE`) and moves driver points into them.
+- **The Hazard**: If **Thread 1** is traversing a quadrant during a $k$-NN search while **Thread 2** inserts a driver that triggers `subdivide()` on that same node:
+  - Thread 1 follows pointers that are actively being reallocated.
+  - **Result**: Immediate **Segmentation Fault (Crash)** or memory corruption.
+
+#### 2. The "Lock Contention" Paradox (Multithreading Becomes Slower)
+
+- The naive solution is wrapping the QuadTree in a global mutex (`std::mutex treeLock`).
+- **The Hazard**: In high-scale ride-matching, thousands of GPS updates arrive every second.
+- If every GPS update locks the entire tree, query threads spend all their CPU cycles blocked waiting for the mutex. Context switching and CPU L1/L2 cache-line invalidation (cache bouncing between cores) will make a locked multithreaded QuadTree **significantly slower than the single-threaded C++ engine**.
+
+#### 3. Use-After-Free during Driver Locking & Eviction
+
+- When a driver is locked or accepted, they are removed from the QuadTree leaf.
+- If a search thread has retrieved a pointer or iterator to a candidate driver while an update thread deletes that driver entity, the reader encounters a **use-after-free** violation.
+
+#### 4. Out-of-Order IPC Desynchronization
+
+- If Query A and Query B execute on separate C++ threads, Query B may complete before Query A.
+- If responses are written to `std::cout` without request IDs, Node.js will assign Query B's result to Query A's promise, causing wrong-driver dispatching.
+
+---
+
+### 2.3 Production Solutions for Parallel Spatial Execution
+
+```
+Approach 1: Node-API (N-API) In-Process Worker Pool (Highest Performance)
+   [Node Event Loop] ── libuv worker pool ──> [Worker Thread 1] ──┐
+                     ── libuv worker pool ──> [Worker Thread 2] ──┼─> [QuadTree with std::shared_mutex]
+                     ── libuv worker pool ──> [Worker Thread 3] ──┘
+
+Approach 2: Asynchronous Multiplexed IPC Bridge (Process Isolation)
+   [Node (Map<reqId, Promise>)] ── stdio / Named Pipe ──> [C++ Ingest Thread]
+                                                                  │ (Task Queue)
+                                                           ┌──────┴──────┐
+                                                       [Worker 1]    [Worker 2]
+                                                           └──────┬──────┘
+                                                                  ▼ (Output Queue)
+   [Node Bridge] <────── {"reqId": 42, "result": [...]} ─ [C++ Egress Thread]
+
+Approach 3: Spatial Sharding / Grid Partitioning (Zero Lock Contention)
+   ┌───────────────────────┬───────────────────────┐
+   │ Sector NW (Core 1)    │ Sector NE (Core 2)    │   <-- Completely isolated trees!
+   │ Dedicated Worker + QT │ Dedicated Worker + QT │       Updates in NW never contend
+   ├───────────────────────┼───────────────────────┤       with searches in SE.
+   │ Sector SW (Core 3)    │ Sector SE (Core 4)    │
+   │ Dedicated Worker + QT │ Dedicated Worker + QT │
+   └───────────────────────┴───────────────────────┘
 ```
 
----
+#### Approach 1: Node-API (`node-addon-api`) with Reader-Writer Locks
 
-## 4. Graph Road Network & Routing Engine
+- Compiles the C++ QuadTree as a native binary addon (`.node`) loaded directly into Node's address space.
+- **Zero IPC Overhead**: Completely removes JSON serialization, OS pipes, and line parsing.
+- **libuv Multi-Core Execution**: Offloads queries to Node's libuv worker pool (`Napi::AsyncWorker`).
+- **Concurrency Protection**: Protected by `std::shared_mutex`:
+  - **Queries**: Acquire `std::shared_lock<std::shared_mutex>` (hundreds of parallel queries execute concurrently without blocking each other).
+  - **Updates/Splits**: Acquire `std::unique_lock<std::shared_mutex>` (exclusive lock for rapid node updates).
 
-Physical roads are **Directed, Weighted Graphs** ($G = (V, E)$):
+#### Approach 2: Multiplexed IPC with Request IDs
 
-- **Vertices ($V$)**: Intersections, flyover ramps, dead-ends.
-- **Edges ($E$)**: One-way and two-way road segments with dual weights:
-  - $w_{\text{dist}}$: Length in meters.
-  - $w_{\text{time}}$: $\frac{\text{Distance}}{\text{Speed} \times \text{Congestion Factor}}$.
+- Preserves process isolation (so a C++ crash cannot bring down the Node.js server).
+- Every query includes a sequence identifier: `QUERY <reqId> <lat> <lng> <k>`.
+- C++ maintains an I/O Ingest thread, a worker thread pool executing queries in parallel, and an I/O Egress thread pushing JSON responses with matching `reqId` tags.
+- Node.js matches responses via `Map<number, Resolver>` instead of a FIFO shift.
 
-### 4.1 Two-Layer Hybrid Spatial-Graph Pipeline
+#### Approach 3: Spatial Sharding / Grid Partitioning (Industry Standard)
 
-```
-[ Raw GPS (lat, lng) ]
-          │
-          ▼
-[ Layer 1: Spatial Snapping (Quadtree) ]
-  • Snaps coordinate to nearest road edge on the street network
-          │
-          ▼
-[ Layer 2: Graph Shortest Path (A* / Contraction Hierarchies) ]
-  • Query 1 (Min Distance): Shortcut Route (Alleys/Streets) -> 6 km | 18 min
-  • Query 2 (Min Time): Express Route (Bypass/Highway)      -> 14 km | 12 min
-```
-
-### 4.2 Accelerating Graph Search (Contraction Hierarchies)
-
-Standard Dijkstra takes 200–500ms over 2,000,000 city road segments.
-**Contraction Hierarchies (CH)** pre-calculates arterial shortcuts to drop citywide route queries from **500ms down to $< 1\,\text{ms}$**.
+- The geographic region is divided into discrete sectors (or H3 / S2 spatial cells).
+- Each sector maintains its own independent QuadTree running on an assigned thread or process.
+- **Zero Lock Contention**: An update in Sector NW never touches or locks Sector SE. Queries crossing boundaries simply query the relevant adjacent sector trees.
 
 ---
 
-## 5. Fare Calculation & Dynamic Route Economics
+## 3. Comparison Matrix of Architectural Approaches
 
-### 5.1 Base Formula
-
-$$\text{Fare} = (\text{Base} + D \times R_{\text{dist}} + T \times R_{\text{time}}) \times \text{Surge} + \text{Tolls} - \text{Discount}$$
-
-### 5.2 The Shortcut vs. Long-Cut Dilemma
-
-- **Shortcut Route (City streets)**: $6\,\text{km}$, $18\,\text{mins} \implies ₹138$.
-- **Express Route (Highway)**: $14\,\text{km}$, $12\,\text{mins} \implies ₹222$.
-
-### 5.3 Real-Time GPS Corridor Tracking
-
-1. At booking, backend generates both route corridors (Path A & Path B).
-2. During the ride, if driver GPS stays within 50m of the shortcut:
-   - Server activates the **Shortcut Discount** (e.g. Save ₹84).
-   - WebSocket pushes: _"Driver took the shortcut! Fare discounted by ₹84."_
-3. **Anti-Detour Protection (Deviation Ceiling)**: If a driver takes an unauthorized detour to inflate the meter, the fare is hard-capped to the upfront estimate.
+| Architecture Pattern              | Parallelism               | Throughput Potential       | IPC Latency                    | Complexity | Fault Isolation               |
+| :-------------------------------- | :------------------------ | :------------------------- | :----------------------------- | :--------- | :---------------------------- |
+| **Current (Single-Thread Stdio)** | ❌ 1 Core (Sequential)    | ~56,000 queries/sec        | ~0.2–0.5 ms pipe overhead      | Low        | ✅ High (Process isolated)    |
+| **Multiplexed IPC + Thread Pool** | ✅ Multi-Core             | ~150,000+ queries/sec      | ~0.2–0.5 ms pipe overhead      | Medium     | ✅ High (Process isolated)    |
+| **In-Process Node-API (N-API)**   | 🚀 Multi-Core (libuv)     | ~300,000+ queries/sec      | **0.00 ms (Zero-copy memory)** | Medium     | ⚠️ Lower (Crash affects Node) |
+| **Spatial Sharding (Cell Grid)**  | 🚀 Enterprise Distributed | **1,000,000+ queries/sec** | Network / Pipe dependent       | High       | ✅ High (Partition isolated)  |
 
 ---
 
-## 6. Dispatch Optimization (Greedy vs. Batch Matching)
+## 4. Concurrency & Distributed Production Possibilities
 
-| Dimension        | Greedy Dispatch (Simple)          | Batch Matching (Uber DISCO Style)                          |
-| :--------------- | :-------------------------------- | :--------------------------------------------------------- |
-| **Trigger**      | Immediate on rider request        | 3–5 second collection window                               |
-| **Optimization** | Local optimum (first nearest car) | Global city-wide minimum wait time                         |
-| **Algorithm**    | $k$-NN spatial lookup             | **Weighted Bipartite Matching** (Kuhn-Munkres / Hungarian) |
-| **Trade-off**    | Fast response, but sub-optimal    | Short 3s wait, but saves 15–20% citywide travel time       |
-
----
-
-## 7. Fault Tolerance, Edge Cases & Concurrency
-
-### 7.1 Mid-Trip Network Drops
-
-1. **15s Offer Window Drop**: Server-side TTL deadman switch automatically reclaims the lock and advances to candidate #2.
-2. **Brief Cellular Blip (5–10s)**: Client reconnects and sends `sync_state`. State machine immediately rehydrates active trip and driver coordinates.
-3. **Driver Disappearance (`en_route`)**: If zero GPS ticks for >30 seconds, server marks driver stale and triggers `rematch(tripId)`, auto-dispatching a replacement car.
-4. **Onboard Security (`in_progress`)**: Cancellation and rematching are strictly blocked once rider is physically inside the car.
-
-### 7.2 The 15.002s Late-Accept Race
-
-If Driver 1 taps accept 2ms after lease expiration:
-
-- Server CAS check confirms offer moved to Candidate #2.
-- Driver 1 is rejected with `409 Conflict / OFFER_EXPIRED`.
-- Driver 1 returns to Quadtree as `available`.
-
----
-
-## 8. GPS Telemetry & High-Frame-Rate Visualization
-
-### The 4-Stage GPS Flow:
-
-1. **Device**: GPS fired at 1–3 Hz (`lat, lng, heading, speed`).
-2. **Backend**: Leaf-cached Quadtree update ($0.17\,\mu\text{s}$), zero DB I/O.
-3. **Network**: Batched into 1 Hz `telemetry_batch` to conserve network bandwidth.
-4. **Frontend Smoothness**:
-   - **LERP (Linear Interpolation)**: 60 FPS `requestAnimationFrame` calculates intermediate positions between 1s ticks.
-   - **Heading Rotation**: Dynamically calculates bearing angle $\theta$ so car icons face forward along the road.
-   - **Dead-Reckoning**: Extrapolates position during brief tunnel outages.
-
----
-
-## 9. Living Backlog & Future Possibilities
-
-- [ ] **Surge Heatmaps**: Compute Quadtree leaf density ratios ($\frac{\text{Demand}}{\text{Supply}}$) to render real-time pricing heatmaps.
-- [ ] **A\* Graph Routing Engine**: Implement in-memory street network routing with dual-weight shortcuts.
-- [ ] **Multi-City Worker Sharding**: Add dynamic region configuration (`REGION=KOLKATA`).
-- [ ] **React + MapLibre GL Client**: WebGL vector map frontend with 60 FPS LERP animations.
-- [ ] **Batch Dispatcher (Bipartite Matcher)**: Add 3-second batching window option alongside instant greedy dispatch.
-- [ ] **PostgreSQL Snapshot Persistence**: Periodic state dump for disaster recovery.
+1. **Single-Process vs. Multi-Instance Topology**:
+   - The current engine uses synchronous single-process critical sections on the event loop, ensuring 0% double-dispatch within one process.
+   - For multi-instance containerized deployments (Kubernetes / ECS), instances should maintain local in-memory QuadTree read caches, delegating authoritative driver lease claims to a centralized Redis cluster (`SET driver:{id}:lock {requestId} NX EX 15`) or PostgreSQL row locks (`SELECT ... FOR UPDATE SKIP LOCKED`).
+2. **Double-Buffering Spatial Indexes**:
+   - For ultra-high-throughput systems, maintain two QuadTree buffers: **Buffer A (Read-Active)** and **Buffer B (Staging)**.
+   - Read queries execute against Buffer A with zero lock overhead. All telemetry updates batch into Buffer B.
+   - Every $50\text{ms}$ (20 Hz), an atomic pointer swap promotes Buffer B to Read-Active and clears Buffer A for the next update batch.
