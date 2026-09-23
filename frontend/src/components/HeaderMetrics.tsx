@@ -1,14 +1,5 @@
+import { Activity, Car, Globe2, Lock, Network, Radio, Zap } from "lucide-react";
 import React from "react";
-import {
-  Activity,
-  Car,
-  CheckCircle2,
-  Globe2,
-  Lock,
-  Network,
-  Radio,
-  Zap,
-} from "lucide-react";
 import { CityPreset, SystemStats } from "../types";
 import { CITY_PRESETS } from "../utils/cities";
 
@@ -101,8 +92,8 @@ export const HeaderMetrics: React.FC<HeaderMetricsProps> = ({
             connectionStatus === "connected"
               ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
               : connectionStatus === "connecting"
-              ? "bg-amber-500/10 text-amber-400 border-amber-500/30"
-              : "bg-rose-500/10 text-rose-400 border-rose-500/30"
+                ? "bg-amber-500/10 text-amber-400 border-amber-500/30"
+                : "bg-rose-500/10 text-rose-400 border-rose-500/30"
           }`}
         >
           <span
@@ -110,8 +101,8 @@ export const HeaderMetrics: React.FC<HeaderMetricsProps> = ({
               connectionStatus === "connected"
                 ? "bg-emerald-400 animate-ping"
                 : connectionStatus === "connecting"
-                ? "bg-amber-400 animate-pulse"
-                : "bg-rose-500"
+                  ? "bg-amber-400 animate-pulse"
+                  : "bg-rose-500"
             }`}
           />
           <Radio className="w-3.5 h-3.5" />
@@ -122,7 +113,9 @@ export const HeaderMetrics: React.FC<HeaderMetricsProps> = ({
         <div className="bg-[#090d16] border border-border px-3.5 py-1.5 rounded-xl flex items-center gap-2.5">
           <Car className="w-4 h-4 text-emerald-400" />
           <div className="flex flex-col">
-            <span className="text-[10px] text-zinc-400 font-medium">Available</span>
+            <span className="text-[10px] text-zinc-400 font-medium">
+              Available
+            </span>
             <span className="text-sm font-bold text-emerald-400 font-mono">
               {stats.availableDrivers}
             </span>
@@ -133,7 +126,9 @@ export const HeaderMetrics: React.FC<HeaderMetricsProps> = ({
         <div className="bg-[#090d16] border border-border px-3.5 py-1.5 rounded-xl flex items-center gap-2.5">
           <Lock className="w-4 h-4 text-amber-400" />
           <div className="flex flex-col">
-            <span className="text-[10px] text-zinc-400 font-medium">Locked / Busy</span>
+            <span className="text-[10px] text-zinc-400 font-medium">
+              Locked / Busy
+            </span>
             <span className="text-sm font-bold text-amber-400 font-mono">
               {stats.busyDrivers}
             </span>
@@ -144,7 +139,9 @@ export const HeaderMetrics: React.FC<HeaderMetricsProps> = ({
         <div className="bg-[#090d16] border border-border px-3.5 py-1.5 rounded-xl flex items-center gap-2.5">
           <Network className="w-4 h-4 text-cyan-400" />
           <div className="flex flex-col">
-            <span className="text-[10px] text-zinc-400 font-medium">QuadTree Nodes</span>
+            <span className="text-[10px] text-zinc-400 font-medium">
+              QuadTree Nodes
+            </span>
             <span className="text-sm font-bold text-cyan-400 font-mono">
               {stats.quadtreeNodes}
             </span>
@@ -155,7 +152,9 @@ export const HeaderMetrics: React.FC<HeaderMetricsProps> = ({
         <div className="bg-[#090d16] border border-border px-3.5 py-1.5 rounded-xl flex items-center gap-2.5">
           <Activity className="w-4 h-4 text-purple-400" />
           <div className="flex flex-col">
-            <span className="text-[10px] text-zinc-400 font-medium">k-NN p50</span>
+            <span className="text-[10px] text-zinc-400 font-medium">
+              k-NN p50
+            </span>
             <span className="text-sm font-bold text-purple-400 font-mono">
               19.1 µs
             </span>
@@ -165,4 +164,3 @@ export const HeaderMetrics: React.FC<HeaderMetricsProps> = ({
     </header>
   );
 };
-

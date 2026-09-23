@@ -8,6 +8,7 @@ import { DriverRegistry } from "./core/driver_registry.js";
 import { MatchingService } from "./core/matching_service.js";
 import { TripStateMachine } from "./core/trip_state_machine.js";
 import { ClientRole, WsManager } from "./gateway/ws_manager.js";
+import { metrics, register } from "./metrics/metrics.js";
 import { DriverSimulator } from "./simulation/driver_simulator.js";
 import { CppSpatialBridge } from "./spatial/cpp_spatial_bridge.js";
 import { CandidateDriver, GeoBounds, QuadTree } from "./spatial/quadtree.js";
@@ -121,10 +122,12 @@ cppBridge.start().then((ok) => {
 
 simulator.onTelemetryTick = (updates) => {
   if (cppBridge.isAvailable()) {
-    for (const u of updates) {
-      cppBridge.update(u.id, u.lat, u.lng);
-    }
+    cppBridge.batchUpdate(updates);
   }
+  metrics.telemetryUpdatesTotal.inc(updates.length);
+  const avail = updates.filter((u) => u.status === "available").length;
+  metrics.activeDrivers.set({ status: "available" }, avail);
+  metrics.activeDrivers.set({ status: "busy" }, updates.length - avail);
   wsManager.broadcastToObservers({
     type: "telemetry_batch",
     drivers: updates,
@@ -184,6 +187,12 @@ fastify.get("/dashboard", async (req, reply) => {
     return fs.readFileSync(distHtml, "utf-8");
   }
   return reply.redirect("/");
+});
+
+// Prometheus Standard Metrics Scraper Route
+fastify.get("/metrics", async (req, reply) => {
+  reply.header("Content-Type", register.contentType);
+  return register.metrics();
 });
 
 // System Health & Spatial Engine Stats
@@ -598,6 +607,7 @@ fastify.post("/rides", async (req, reply) => {
 
   const safeTimeout = clampTimeout(body.offerTimeoutMs);
 
+  const t0 = performance.now();
   const result = await matchingService.requestRide({
     requestId: body.requestId || `req_${Date.now()}`,
     riderId: body.riderId,
@@ -605,11 +615,15 @@ fastify.post("/rides", async (req, reply) => {
     dropoff: body.dropoff,
     offerTimeoutMs: safeTimeout,
   });
+  const durationSec = (performance.now() - t0) / 1000;
+  metrics.matchDurationSeconds.observe(durationSec);
 
   if (!result.success) {
+    metrics.matchRequestsTotal.inc({ status: "exhausted" });
     return reply.status(409).send(result);
   }
 
+  metrics.matchRequestsTotal.inc({ status: "success" });
   return reply.status(202).send(result);
 });
 

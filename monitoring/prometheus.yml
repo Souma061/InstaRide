@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: "instaride-backend"
+    metrics_path: "/metrics"
+    scrape_interval: 5s
+    static_configs:
+      - targets: ["host.docker.internal:3000"]
+        labels:
+          app: "instaride-matching-engine"
+          env: "development"

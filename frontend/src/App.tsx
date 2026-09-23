@@ -1,5 +1,5 @@
 import { Car, Flame, Navigation2 } from "lucide-react";
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
 import { AuditLogStream } from "./components/AuditLogStream";
 import { ChaosTestingPanel } from "./components/ChaosTestingPanel";
 import { DriverCockpit } from "./components/DriverCockpit";
@@ -54,7 +54,9 @@ export function App() {
     if (typeof window === "undefined") return "map";
     const p = window.location.pathname;
     const h = window.location.hash;
-    return p.includes("dashboard") || h.includes("dashboard") ? "dashboard" : "map";
+    return p.includes("dashboard") || h.includes("dashboard")
+      ? "dashboard"
+      : "map";
   });
 
   // Sync URL changes with popstate
@@ -63,7 +65,9 @@ export function App() {
       const p = window.location.pathname;
       const h = window.location.hash;
       setCurrentRoute(
-        p.includes("dashboard") || h.includes("dashboard") ? "dashboard" : "map",
+        p.includes("dashboard") || h.includes("dashboard")
+          ? "dashboard"
+          : "map",
       );
     };
     window.addEventListener("popstate", handlePopState);
