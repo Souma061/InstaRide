@@ -66,15 +66,26 @@ int main()
         }
         else if (cmd == "UPDATE")
         {
-            // UPDATE id lat lng
             std::string id;
             double lat, lng;
             ss >> id >> lat >> lng;
-            bool ok = tree->update(id, lat, lng);
-            std::cout << "{\"status\":\"ok\",\"action\":\"UPDATE\",\"id\":\"" << id
-                      << "\",\"success\":" << (ok ? "true" : "false") << "}\n"
-                      << std::flush;
+            tree->update(id, lat, lng);
+            // fire and forget, no need to return success/failure for update, no std flush
         }
+        else if (cmd == "BATCH_UPDATE")
+        {
+            int count = 0;
+            ss >> count;
+            double lat, lng;
+            std::string id;
+            for (int i = 0; i < count; i++)
+            {
+                if (ss >> id >> lat >> lng)
+                {
+                    tree->update(id, lat, lng);
+                }
+            }
+        } // fire and forgetr. No json and no std::flush here.
         else if (cmd == "REMOVE")
         {
             // REMOVE id
@@ -93,19 +104,19 @@ int main()
             double maxRadius = 50000.0;
             ss >> qLat >> qLng >> k >> maxRadius;
 
-            #ifdef _WIN32
+#ifdef _WIN32
             LARGE_INTEGER freq, tStart, tEnd;
             QueryPerformanceFrequency(&freq);
             QueryPerformanceCounter(&tStart);
             auto results = tree->KNearestNeighBors(qLat, qLng, k, maxRadius);
             QueryPerformanceCounter(&tEnd);
             double durationMicroseconds = (double)(tEnd.QuadPart - tStart.QuadPart) * 1000000.0 / (double)freq.QuadPart;
-            #else
+#else
             auto t0 = std::chrono::high_resolution_clock::now();
             auto results = tree->KNearestNeighBors(qLat, qLng, k, maxRadius);
             auto t1 = std::chrono::high_resolution_clock::now();
             double durationMicroseconds = std::chrono::duration<double, std::micro>(t1 - t0).count();
-            #endif
+#endif
 
             // Format candidate matches as JSON
             std::cout << "{\"status\":\"ok\",\"action\":\"KNN\",\"latencyUs\":"

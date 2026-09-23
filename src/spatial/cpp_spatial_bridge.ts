@@ -134,12 +134,21 @@ export class CppSpatialBridge {
     return res.success ?? false;
   }
 
-  public async update(id: string, lat: number, lng: number): Promise<boolean> {
-    if (!this.isAvailable()) return false;
-    const res = await this.sendCommand(`UPDATE ${id} ${lat} ${lng}`);
-    return res.success ?? false;
+  public update(id: string, lat: number, lng: number): void {
+    if (!this.isAvailable() || !this.process?.stdin) return;
+    this.process.stdin.write(`UPDATE ${id} ${lat} ${lng}\n`);
   }
-
+  public batchUpdate(
+    updates: Array<{ id: string; lat: number; lng: number }>,
+  ): void {
+    if (!this.isAvailable() || !this.process?.stdin || updates.length === 0)
+      return;
+    let payload = `BATCH_UPDATE ${updates.length}`;
+    for (const update of updates) {
+      payload += ` ${update.id} ${update.lat} ${update.lng}`;
+    }
+    this.process.stdin.write(`${payload}\n`);
+  }
   public async remove(id: string): Promise<boolean> {
     if (!this.isAvailable()) return false;
     const res = await this.sendCommand(`REMOVE ${id}`);

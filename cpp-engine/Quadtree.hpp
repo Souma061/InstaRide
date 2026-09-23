@@ -68,7 +68,7 @@ class QuadtreeNode
 public:
     GeoBounds bounds;
     int depth;
-    std::vector<Point> point;
+    std::vector<Point *> point;
     bool isDivided;
 
     QuadtreeNode *nw;
@@ -101,6 +101,12 @@ public:
 };
 
 // quadtree
+struct DriverRecord
+{
+    Point point;
+    QuadtreeNode *leaf;
+};
+
 class Quadtree
 {
 public:
@@ -109,56 +115,54 @@ public:
     int maxDepth;
 
 private:
-    std::unordered_map<std::string, Point> driverMap;
-    std::unordered_map<std::string, QuadtreeNode *> driverLeaves;
+    std::unordered_map<std::string, DriverRecord> driverIndex;
 
     bool contains(const GeoBounds &b, double lat, double lng) const
     {
         return (lat >= b.minLat && lat <= b.maxLat && lng >= b.minLng && lng <= b.maxLng);
     }
-
-    QuadtreeNode *insertChild(QuadtreeNode *node, const Point &point)
+    QuadtreeNode *insertChild(QuadtreeNode *node, Point *point)
     {
         double midLat = (node->bounds.minLat + node->bounds.maxLat) / 2.0;
         double midLng = (node->bounds.minLng + node->bounds.maxLng) / 2.0;
 
         QuadtreeNode *targetChild = nullptr;
-        if (point.lat >= midLat)
+        if (point->lat >= midLat)
         {
-            targetChild = (point.lng < midLng) ? node->nw : node->ne;
+            targetChild = (point->lng < midLng) ? node->nw : node->ne;
         }
         else
         {
-            targetChild = (point.lng < midLng) ? node->sw : node->se;
+            targetChild = (point->lng < midLng) ? node->sw : node->se;
         }
-        return insertNode(targetChild, point);
+        return insertNode(targetChild, point); // <-- Pass 'point', not '*point'
     }
 
-    QuadtreeNode *insertNode(QuadtreeNode *node, const Point &point)
+    QuadtreeNode *insertNode(QuadtreeNode *node, Point *point) // <-- Change 'const Point &' to 'Point *'
     {
-        if (!contains(node->bounds, point.lat, point.lng))
+        if (!contains(node->bounds, point->lat, point->lng))
         {
             return nullptr;
         }
         // leafnode: under capacity or at maxdepth limit
         if (!node->isDivided && ((int)node->point.size() < capacity || node->depth >= maxDepth))
         {
-            node->point.push_back(point);
+            node->point.push_back(point); // <-- Now types match! (Point* into vector<Point*>)
             return node;
         }
         // subdivide if not already divided
         if (!node->isDivided)
         {
             node->subDivide();
-            std::vector<Point> existing = std::move(node->point);
+            std::vector<Point *> existing = std::move(node->point); // <-- std::vector<Point*>
             node->point.clear();
-            for (const auto &p : existing)
+            for (Point *p : existing)
             {
                 // Insert the existing point into the appropriate child node
                 QuadtreeNode *targetLeaf = insertChild(node, p);
                 if (targetLeaf)
                 {
-                    driverLeaves[p.id] = targetLeaf;
+                    driverIndex[p->id].leaf = targetLeaf;
                 }
             }
         }
@@ -178,39 +182,38 @@ public:
 
     bool remove(const std::string &id)
     {
-        auto itLeaf = driverLeaves.find(id);
-        if (itLeaf == driverLeaves.end())
+        auto itLeaf = driverIndex.find(id);
+        if (itLeaf == driverIndex.end() || !itLeaf->second.leaf)
             return false;
 
-        QuadtreeNode *leaf = itLeaf->second;
+        QuadtreeNode *leaf = itLeaf->second.leaf;
         auto &pts = leaf->point;
         for (size_t i = 0; i < pts.size(); ++i)
         {
-            if (pts[i].id == id)
+            if (pts[i]->id == id)
             {
                 pts.erase(pts.begin() + i);
-                driverMap.erase(id);
-                driverLeaves.erase(id);
+                driverIndex.erase(itLeaf);
                 return true;
             }
         }
-        return false;
+        driverIndex.erase(itLeaf);
+        return true;
     }
 
     bool update(const std::string &id, double lat, double lng)
     {
-        auto itPt = driverMap.find(id);
-        auto itLeaf = driverLeaves.find(id);
-        if (itPt == driverMap.end() || itLeaf == driverLeaves.end())
+        auto it = driverIndex.find(id);
+        if (it == driverIndex.end() || !it->second.leaf)
         {
             return false;
         }
 
         // Fast path: still in the same leaf bounding box
-        if (contains(itLeaf->second->bounds, lat, lng))
+        if (contains(it->second.leaf->bounds, lat, lng))
         {
-            itPt->second.lat = lat;
-            itPt->second.lng = lng;
+            it->second.point.lat = lat;
+            it->second.point.lng = lng;
             return true;
         }
 
@@ -221,21 +224,23 @@ public:
 
     bool insert(const std::string &id, double lat, double lng)
     {
-        if (driverMap.find(id) != driverMap.end())
+        if (!contains(root->bounds, lat, lng))
         {
-            remove(id);
+            return false;
         }
-        Point pt{id, lat, lng};
-        QuadtreeNode *leaf = insertNode(root, pt);
+        Point *newPoint = new Point{id, lat, lng};
+        QuadtreeNode *leaf = insertNode(root, newPoint);
         if (leaf)
         {
-            driverMap[id] = pt;
-            driverLeaves[id] = leaf;
+            driverIndex[id] = {*newPoint, leaf};
             return true;
         }
-        return false;
+        else
+        {
+            delete newPoint; // Clean up if insertion failed
+            return false;
+        }
     }
-
     // branch-end-Bound KNN using a Min-priority Queue
     std::vector<CandidateDriver> KNearestNeighBors(double queryLat, double queryLng, int k, double maxSearchRadiusMeters = 50000.0)
     {
@@ -271,15 +276,15 @@ public:
             }
             QuadtreeNode *node = current.node;
             // evaluates point inside thios node
-            for (const auto &pt : node->point)
+            for (const auto *pt : node->point)
             {
-                double d = haversineDistance(queryLat, queryLng, pt.lat, pt.lng);
+                double d = haversineDistance(queryLat, queryLng, pt->lat, pt->lng);
                 if (d <= maxSearchRadiusMeters)
                 {
                     if ((int)candidates.size() < k || d < candidates.back().distance)
                     {
                         // insert in sorted order
-                        CandidateDriver cd{pt.id, pt.lat, pt.lng, d};
+                        CandidateDriver cd{pt->id, pt->lat, pt->lng, d};
                         auto insertPos = std::lower_bound(candidates.begin(), candidates.end(), cd, [](const CandidateDriver &a, const CandidateDriver &b)
                                                           { return a.distance < b.distance; });
                         candidates.insert(insertPos, cd);

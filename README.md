@@ -132,16 +132,16 @@ InstaRide includes both an in-memory TypeScript PR-QuadTree and a compiled nativ
 
 Both engines were benchmarked side-by-side on an enterprise scale of **1,000,000 concurrent drivers** across 20,000 nearest-neighbor queries, capturing tail latencies (p50, p95, p99) and resident memory:
 
-| Benchmark Phase                       | Native C++ (`-O3`)                                                   | TypeScript (Node v24 V8)                                             | Comparison & Engineering Takeaways                     |
-| :------------------------------------ | :------------------------------------------------------------------- | :------------------------------------------------------------------- | :----------------------------------------------------- |
-| **Average Query Latency**             | **17.71 $\mu s$**                                                    | 33.75 $\mu s$                                                        | 🚀 **~48% lower average latency**                      |
-| **Median (p50) Latency**              | **16.50 $\mu s$**                                                    | 28.50 $\mu s$                                                        | 🚀 **Sub-20 microsecond core execution**               |
-| **p95 Tail Latency**                  | **24.40 $\mu s$**                                                    | 58.20 $\mu s$                                                        | 🚀 **2.38× faster 95th percentile**                    |
-| **p99 Worst-Case Latency**            | **31.40 $\mu s$**                                                    | 112.40 $\mu s$                                                       | 🚀 **3.58× faster p99** (V8 GC pause resilience)       |
-| **Query Throughput**                  | **56,450 queries/sec**                                               | 29,631 queries/sec                                                   | 🚀 **+26,800 MORE queries/sec**                        |
-| **50,000 Telemetry Updates**          | **229.25 ms** (218k/sec)                                             | 183.49 ms (272k/sec)                                                 | Fast pointer dereferencing & spatial leaf updates      |
-| **Memory Footprint**                  | **~221 MB Working Set** (216 MB heap)                               | ~353 MB Heap (**513 MB RSS**)                                        | 🚀 **C++ uses 57% less total OS RAM**                  |
-| **1M Drivers Insertion**              | 7.87 sec (127k/sec)                                                  | 1.88 sec (531k/sec)                                                  | TS benefits from V8 young-generation bump allocator    |
+| Benchmark Phase              | Native C++ (`-O3`)                    | TypeScript (Node v24 V8)      | Comparison & Engineering Takeaways                  |
+| :--------------------------- | :------------------------------------ | :---------------------------- | :-------------------------------------------------- |
+| **Average Query Latency**    | **17.71 $\mu s$**                     | 33.75 $\mu s$                 | 🚀 **~48% lower average latency**                   |
+| **Median (p50) Latency**     | **16.50 $\mu s$**                     | 28.50 $\mu s$                 | 🚀 **Sub-20 microsecond core execution**            |
+| **p95 Tail Latency**         | **24.40 $\mu s$**                     | 58.20 $\mu s$                 | 🚀 **2.38× faster 95th percentile**                 |
+| **p99 Worst-Case Latency**   | **31.40 $\mu s$**                     | 112.40 $\mu s$                | 🚀 **3.58× faster p99** (V8 GC pause resilience)    |
+| **Query Throughput**         | **56,450 queries/sec**                | 29,631 queries/sec            | 🚀 **+26,800 MORE queries/sec**                     |
+| **50,000 Telemetry Updates** | **229.25 ms** (218k/sec)              | 183.49 ms (272k/sec)          | Fast pointer dereferencing & spatial leaf updates   |
+| **Memory Footprint**         | **~221 MB Working Set** (216 MB heap) | ~353 MB Heap (**513 MB RSS**) | 🚀 **C++ uses 57% less total OS RAM**               |
+| **1M Drivers Insertion**     | 7.87 sec (127k/sec)                   | 1.88 sec (531k/sec)           | TS benefits from V8 young-generation bump allocator |
 
 #### Key Architectural Findings:
 
@@ -170,8 +170,8 @@ Both engines were benchmarked side-by-side on an enterprise scale of **1,000,000
   - When locked, the driver is pulled from the QuadTree in $O(1)$, making them invisible to competing queries.
   - If Driver 1 rejects or times out, the lock is released, Driver 1 returns to the QuadTree, and the matching service automatically cascades to Candidate #2 without user intervention.
 - **Single-Process vs. Distributed Guarantees**:
-  - *What the current tests prove*: Verifies zero double-dispatch under high concurrent async request bursts within a single Node.js runtime.
-  - *What distributed production requires*: Multi-process/container deployments require an external coordination primitive (e.g., Redis `SET NX` with lease TTL or PostgreSQL row-level locks). See the [Distributed Scaling Roadmap](#distributed-evolution--production-scaling-roadmap) below.
+  - _What the current tests prove_: Verifies zero double-dispatch under high concurrent async request bursts within a single Node.js runtime.
+  - _What distributed production requires_: Multi-process/container deployments require an external coordination primitive (e.g., Redis `SET NX` with lease TTL or PostgreSQL row-level locks). See the [Distributed Scaling Roadmap](#distributed-evolution--production-scaling-roadmap) below.
 
 ### 5. Deterministic Trip Finite State Machine (FSM)
 

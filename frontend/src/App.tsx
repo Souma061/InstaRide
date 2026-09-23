@@ -1,10 +1,11 @@
 import { Car, Flame, Navigation2 } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { AuditLogStream } from "./components/AuditLogStream";
 import { ChaosTestingPanel } from "./components/ChaosTestingPanel";
 import { DriverCockpit } from "./components/DriverCockpit";
 import { DynamicSpatialMap } from "./components/DynamicSpatialMap";
 import { HeaderMetrics } from "./components/HeaderMetrics";
+import { OperationsDashboard } from "./components/OperationsDashboard";
 import { RiderCockpit } from "./components/RiderCockpit";
 import { useInstaRideSocket } from "./hooks/useInstaRideSocket";
 import { GeoPoint } from "./types";
@@ -48,6 +49,35 @@ export function App() {
     "rider",
   );
 
+  // Client-side route: 'map' | 'dashboard'
+  const [currentRoute, setCurrentRoute] = useState<"map" | "dashboard">(() => {
+    if (typeof window === "undefined") return "map";
+    const p = window.location.pathname;
+    const h = window.location.hash;
+    return p.includes("dashboard") || h.includes("dashboard") ? "dashboard" : "map";
+  });
+
+  // Sync URL changes with popstate
+  useEffect(() => {
+    const handlePopState = () => {
+      const p = window.location.pathname;
+      const h = window.location.hash;
+      setCurrentRoute(
+        p.includes("dashboard") || h.includes("dashboard") ? "dashboard" : "map",
+      );
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  const handleNavigate = (route: "map" | "dashboard") => {
+    setCurrentRoute(route);
+    const targetUrl = route === "dashboard" ? "/dashboard" : "/";
+    try {
+      window.history.pushState(null, "", targetUrl);
+    } catch {}
+  };
+
   // Update points when city changes
   const handleCityChange = (city: typeof activeCity) => {
     switchCity(city, 40);
@@ -62,114 +92,134 @@ export function App() {
 
   return (
     <div className="min-h-screen bg-[#090d16] text-zinc-100 p-4 md:p-6 space-y-4 max-w-[1600px] mx-auto select-none">
-      {/* 1. Header & Live Metrics Bar */}
+      {/* 1. Header & Live Metrics Bar with Route Switcher */}
       <HeaderMetrics
         activeCity={activeCity}
         onCityChange={handleCityChange}
         connectionStatus={connectionStatus}
         stats={systemStats}
+        currentRoute={currentRoute}
+        onNavigate={handleNavigate}
       />
 
-      {/* 2. Main Spatial & Cockpit Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-        {/* Spatial Map Viewport (8 Columns) */}
-        <div className="lg:col-span-7 xl:col-span-8">
-          <DynamicSpatialMap
-            activeCity={activeCity}
-            activeBounds={activeBounds}
-            drivers={drivers}
-            activeTrip={activeTrip}
-            concurrencyRaceResult={concurrencyRaceResult}
-            pickupPoint={pickupPoint}
-            dropoffPoint={dropoffPoint}
-            onSelectPickup={setPickupPoint}
-            onSelectDropoff={setDropoffPoint}
-            onReseedRegion={reseedRegion}
-            onSpawnDriver={spawnDriver}
-            onJumpToCity={handleCityChange}
-          />
-        </div>
+      {/* 2. Route Switching: Operations Dashboard vs Live Spatial Map */}
+      {currentRoute === "dashboard" ? (
+        <OperationsDashboard
+          activeCity={activeCity}
+          stats={systemStats}
+          drivers={drivers}
+          auditLogs={auditLogs}
+          concurrencyRaceResult={concurrencyRaceResult}
+          onNavigateToMap={() => handleNavigate("map")}
+          onTrigger2RiderRace={trigger2RiderRace}
+          onClearRaceResult={clearRaceEvidence}
+          onReseedRegion={reseedRegion}
+          onClearAuditLogs={clearAuditLogs}
+        />
+      ) : (
+        <>
+          {/* Main Spatial & Cockpit Grid */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+            {/* Spatial Map Viewport (8 Columns) */}
+            <div className="lg:col-span-7 xl:col-span-8">
+              <DynamicSpatialMap
+                activeCity={activeCity}
+                activeBounds={activeBounds}
+                drivers={drivers}
+                activeTrip={activeTrip}
+                concurrencyRaceResult={concurrencyRaceResult}
+                pickupPoint={pickupPoint}
+                dropoffPoint={dropoffPoint}
+                onSelectPickup={setPickupPoint}
+                onSelectDropoff={setDropoffPoint}
+                onReseedRegion={reseedRegion}
+                onSpawnDriver={spawnDriver}
+                onJumpToCity={handleCityChange}
+              />
+            </div>
 
-        {/* Cockpit Controls & Role Tabs (5 Columns) */}
-        <div className="lg:col-span-5 xl:col-span-4 flex flex-col space-y-3">
-          {/* Tab Bar */}
-          <div className="flex items-center bg-card border border-border p-1 rounded-xl gap-1">
-            <button
-              onClick={() => setActiveTab("rider")}
-              className={`flex-1 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition ${
-                activeTab === "rider"
-                  ? "bg-[#090d16] text-emerald-400 shadow-sm border border-emerald-500/20"
-                  : "text-zinc-400 hover:text-zinc-200"
-              }`}
-            >
-              <Car className="w-3.5 h-3.5" />
-              <span>Rider Booking</span>
-            </button>
-            <button
-              onClick={() => setActiveTab("driver")}
-              className={`flex-1 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition ${
-                activeTab === "driver"
-                  ? "bg-[#090d16] text-cyan-400 shadow-sm border border-cyan-500/20"
-                  : "text-zinc-400 hover:text-zinc-200"
-              }`}
-            >
-              <Navigation2 className="w-3.5 h-3.5" />
-              <span>Driver View</span>
-            </button>
-            <button
-              onClick={() => setActiveTab("chaos")}
-              className={`flex-1 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition ${
-                activeTab === "chaos"
-                  ? "bg-[#090d16] text-amber-400 shadow-sm border border-amber-500/20"
-                  : "text-zinc-400 hover:text-zinc-200"
-              }`}
-            >
-              <Flame className="w-3.5 h-3.5" />
-              <span>Chaos Suite</span>
-            </button>
+            {/* Cockpit Controls & Role Tabs (5 Columns) */}
+            <div className="lg:col-span-5 xl:col-span-4 flex flex-col space-y-3">
+              {/* Tab Bar */}
+              <div className="flex items-center bg-card border border-border p-1 rounded-xl gap-1">
+                <button
+                  onClick={() => setActiveTab("rider")}
+                  className={`flex-1 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition ${
+                    activeTab === "rider"
+                      ? "bg-[#090d16] text-emerald-400 shadow-sm border border-emerald-500/20"
+                      : "text-zinc-400 hover:text-zinc-200"
+                  }`}
+                >
+                  <Car className="w-3.5 h-3.5" />
+                  <span>Rider Booking</span>
+                </button>
+                <button
+                  onClick={() => setActiveTab("driver")}
+                  className={`flex-1 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition ${
+                    activeTab === "driver"
+                      ? "bg-[#090d16] text-cyan-400 shadow-sm border border-cyan-500/20"
+                      : "text-zinc-400 hover:text-zinc-200"
+                  }`}
+                >
+                  <Navigation2 className="w-3.5 h-3.5" />
+                  <span>Driver View</span>
+                </button>
+                <button
+                  onClick={() => setActiveTab("chaos")}
+                  className={`flex-1 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition ${
+                    activeTab === "chaos"
+                      ? "bg-[#090d16] text-amber-400 shadow-sm border border-amber-500/20"
+                      : "text-zinc-400 hover:text-zinc-200"
+                  }`}
+                >
+                  <Flame className="w-3.5 h-3.5" />
+                  <span>Chaos Suite</span>
+                </button>
+              </div>
+
+              {/* Tab Content Panes */}
+              {activeTab === "rider" && (
+                <RiderCockpit
+                  activeCity={activeCity}
+                  pickup={pickupPoint}
+                  dropoff={dropoffPoint}
+                  onSetPickup={setPickupPoint}
+                  onSetDropoff={setDropoffPoint}
+                  activeTrip={activeTrip}
+                  onRequestRide={sendRideRequest}
+                  onCancelRide={cancelActiveRide}
+                />
+              )}
+
+              {activeTab === "driver" && (
+                <DriverCockpit
+                  drivers={drivers}
+                  activeTrip={activeTrip}
+                  onAcceptOffer={(driverId, reqId) =>
+                    sendDriverResponse(driverId, reqId, "accepted")
+                  }
+                  onRejectOffer={(driverId, reqId) =>
+                    sendDriverResponse(driverId, reqId, "rejected")
+                  }
+                  onDriverAction={sendDriverAction}
+                />
+              )}
+
+              {activeTab === "chaos" && (
+                <ChaosTestingPanel
+                  onTrigger2RiderRace={trigger2RiderRace}
+                  onResetDrivers={() => switchCity(activeCity, 40)}
+                  raceResult={concurrencyRaceResult}
+                  onClearRaceResult={clearRaceEvidence}
+                />
+              )}
+            </div>
           </div>
 
-          {/* Tab Content Panes */}
-          {activeTab === "rider" && (
-            <RiderCockpit
-              activeCity={activeCity}
-              pickup={pickupPoint}
-              dropoff={dropoffPoint}
-              onSetPickup={setPickupPoint}
-              onSetDropoff={setDropoffPoint}
-              activeTrip={activeTrip}
-              onRequestRide={sendRideRequest}
-              onCancelRide={cancelActiveRide}
-            />
-          )}
-
-          {activeTab === "driver" && (
-            <DriverCockpit
-              drivers={drivers}
-              activeTrip={activeTrip}
-              onAcceptOffer={(driverId, reqId) =>
-                sendDriverResponse(driverId, reqId, "accepted")
-              }
-              onRejectOffer={(driverId, reqId) =>
-                sendDriverResponse(driverId, reqId, "rejected")
-              }
-              onDriverAction={sendDriverAction}
-            />
-          )}
-
-          {activeTab === "chaos" && (
-            <ChaosTestingPanel
-              onTrigger2RiderRace={trigger2RiderRace}
-              onResetDrivers={() => switchCity(activeCity, 40)}
-              raceResult={concurrencyRaceResult}
-              onClearRaceResult={clearRaceEvidence}
-            />
-          )}
-        </div>
-      </div>
-
-      {/* 3. Real-Time Audit Log Stream */}
-      <AuditLogStream logs={auditLogs} onClear={clearAuditLogs} />
+          {/* 3. Real-Time Audit Log Stream */}
+          <AuditLogStream logs={auditLogs} onClear={clearAuditLogs} />
+        </>
+      )}
     </div>
   );
 }

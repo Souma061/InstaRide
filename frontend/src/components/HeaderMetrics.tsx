@@ -17,6 +17,8 @@ interface HeaderMetricsProps {
   onCityChange: (city: CityPreset) => void;
   connectionStatus: "connected" | "connecting" | "disconnected" | "standalone";
   stats: SystemStats;
+  currentRoute?: "map" | "dashboard";
+  onNavigate?: (route: "map" | "dashboard") => void;
 }
 
 export const HeaderMetrics: React.FC<HeaderMetricsProps> = ({
@@ -24,6 +26,8 @@ export const HeaderMetrics: React.FC<HeaderMetricsProps> = ({
   onCityChange,
   connectionStatus,
   stats,
+  currentRoute = "map",
+  onNavigate,
 }) => {
   return (
     <header className="bg-card border border-border rounded-2xl p-4 shadow-lg backdrop-blur-md flex flex-wrap items-center justify-between gap-4">
@@ -61,6 +65,32 @@ export const HeaderMetrics: React.FC<HeaderMetricsProps> = ({
             </select>
           </div>
         </div>
+      </div>
+
+      {/* Primary Route Navigation Pill Switcher */}
+      <div className="flex items-center bg-[#090d16] border border-zinc-700/80 p-1 rounded-xl gap-1">
+        <button
+          onClick={() => onNavigate?.("map")}
+          className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
+            currentRoute === "map"
+              ? "bg-zinc-800 text-emerald-400 shadow-sm border border-emerald-500/30"
+              : "text-zinc-400 hover:text-zinc-200"
+          }`}
+        >
+          <Radio className="w-3.5 h-3.5" />
+          <span>Live Map</span>
+        </button>
+        <button
+          onClick={() => onNavigate?.("dashboard")}
+          className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
+            currentRoute === "dashboard"
+              ? "bg-zinc-800 text-cyan-400 shadow-sm border border-cyan-500/30"
+              : "text-zinc-400 hover:text-zinc-200"
+          }`}
+        >
+          <Activity className="w-3.5 h-3.5" />
+          <span>Dashboard</span>
+        </button>
       </div>
 
       {/* Metrics Counters */}

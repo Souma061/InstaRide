@@ -176,6 +176,16 @@ fastify.get("/", async (req, reply) => {
   };
 });
 
+// Serve the dashboard SPA directly at /dashboard
+fastify.get("/dashboard", async (req, reply) => {
+  const distHtml = path.resolve(__dirname, "../frontend/dist/index.html");
+  if (fs.existsSync(distHtml)) {
+    reply.type("text/html");
+    return fs.readFileSync(distHtml, "utf-8");
+  }
+  return reply.redirect("/");
+});
+
 // System Health & Spatial Engine Stats
 fastify.get("/health", async () => {
   return {

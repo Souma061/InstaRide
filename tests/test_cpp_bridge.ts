@@ -30,6 +30,17 @@ async function main() {
   await bridge.insert("driver_blr_3", 12.91, 77.59);
   console.log("✅ Inserted 3 test drivers into C++ Quadtree");
 
+  // Test fire-and-forget single update
+  bridge.update("driver_blr_1", 12.932, 77.612);
+  console.log("✅ Fire-and-forget single update sent");
+
+  // Test fire-and-forget batch update
+  bridge.batchUpdate([
+    { id: "driver_blr_2", lat: 12.90, lng: 77.60 },
+    { id: "driver_blr_3", lat: 12.92, lng: 77.62 },
+  ]);
+  console.log("✅ Fire-and-forget batch update sent");
+
   // Query k-NN
   const result = await bridge.kNearestNeighbors(12.935, 77.615, 2, 10000);
   console.log(
