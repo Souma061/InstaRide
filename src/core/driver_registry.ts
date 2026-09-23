@@ -1,3 +1,4 @@
+import { metrics } from "../metrics/metrics.js";
 import { CandidateDriver, QuadTree } from "../spatial/quadtree.js";
 
 export type DriverStatus = "available" | "busy" | "offline";
@@ -214,7 +215,22 @@ export class DriverRegistry {
     k: number = 4,
     maxRadiusMeters: number = 10_000,
   ): CandidateDriver[] {
-    return this.spatialIndex.kNearestNeighbors(lat, lng, k, maxRadiusMeters);
+    const t0 = performance.now();
+    const result = this.spatialIndex.kNearestNeighbors(
+      lat,
+      lng,
+      k,
+      maxRadiusMeters,
+    );
+    const latencyUs = (performance.now() - t0) * 1000;
+    try {
+      metrics.spatialQueryLatencyUs.observe({ engine: "ts" }, latencyUs);
+      metrics.knnLatencySeconds.observe(
+        { engine: "ts" },
+        latencyUs / 1_000_000,
+      );
+    } catch {}
+    return result;
   }
 
   /**

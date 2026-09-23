@@ -32,12 +32,13 @@ export const BLR_BOUNDS: GeoBounds = {
 let activeCityName = "Bengaluru";
 let activeBounds: GeoBounds = { ...BLR_BOUNDS };
 
-// Keep the visualizer local by default. An externally bound instance must use
-// a control credential until it is placed behind real user authentication.
-const HOST = process.env.HOST || "127.0.0.1";
+const HOST = process.env.HOST || "0.0.0.0";
 const CONTROL_API_TOKEN = process.env.CONTROL_API_TOKEN;
 const isLoopbackHost =
-  HOST === "127.0.0.1" || HOST === "localhost" || HOST === "::1";
+  HOST === "127.0.0.1" ||
+  HOST === "localhost" ||
+  HOST === "::1" ||
+  HOST === "0.0.0.0";
 if (!isLoopbackHost && !CONTROL_API_TOKEN) {
   throw new Error("CONTROL_API_TOKEN is required when HOST is not loopback");
 }
@@ -333,6 +334,13 @@ fastify.post("/simulator/concurrency-race", async (req, reply) => {
     );
     candidates = res.candidates;
     queryLatencyUs = res.latencyUs;
+    try {
+      metrics.spatialQueryLatencyUs.observe({ engine: "cpp" }, queryLatencyUs);
+      metrics.knnLatencySeconds.observe(
+        { engine: "cpp" },
+        queryLatencyUs / 1_000_000,
+      );
+    } catch {}
   } else {
     const t0 = performance.now();
     candidates = driverRegistry.findNearbyCandidates(

@@ -53,6 +53,13 @@ export const metrics = {
     labelNames: ["engine"], // 'cpp' | 'ts'
     buckets: [10, 25, 50, 100, 250, 500, 1000, 2500],
   }),
+
+  knnLatencySeconds: new client.Histogram({
+    name: "instaride_knn_latency_seconds",
+    help: "k-NN spatial search latency in seconds",
+    labelNames: ["engine"],
+    buckets: [0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01],
+  }),
 };
 
 export const register = client.register;

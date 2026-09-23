@@ -8,7 +8,7 @@ import { HeaderMetrics } from "./components/HeaderMetrics";
 import { OperationsDashboard } from "./components/OperationsDashboard";
 import { RiderCockpit } from "./components/RiderCockpit";
 import { useInstaRideSocket } from "./hooks/useInstaRideSocket";
-import { GeoPoint } from "./types";
+import { CityPreset, GeoPoint } from "./types";
 import { CITY_PRESETS } from "./utils/cities";
 
 export function App() {
@@ -83,7 +83,7 @@ export function App() {
   };
 
   // Update points when city changes
-  const handleCityChange = (city: typeof activeCity) => {
+  const handleCityChange = (city: CityPreset) => {
     switchCity(city, 40);
     setPickupPoint(city.landmarks[0]?.point || city.center);
     setDropoffPoint(
@@ -95,7 +95,7 @@ export function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[#090d16] text-zinc-100 p-4 md:p-6 space-y-4 max-w-[1600px] mx-auto select-none">
+    <div className="min-h-screen bg-[#090d16] text-zinc-100 p-4 md:p-6 space-y-4 max-w-[1600px] mx-auto">
       {/* 1. Header & Live Metrics Bar with Route Switcher */}
       <HeaderMetrics
         activeCity={activeCity}
@@ -117,7 +117,9 @@ export function App() {
           onNavigateToMap={() => handleNavigate("map")}
           onTrigger2RiderRace={trigger2RiderRace}
           onClearRaceResult={clearRaceEvidence}
-          onReseedRegion={reseedRegion}
+          onReseedRegion={(count) =>
+            reseedRegion(activeCity.bounds, activeCity.name, count)
+          }
           onClearAuditLogs={clearAuditLogs}
         />
       ) : (
@@ -127,6 +129,7 @@ export function App() {
             {/* Spatial Map Viewport (8 Columns) */}
             <div className="lg:col-span-7 xl:col-span-8">
               <DynamicSpatialMap
+                key={activeCity.id}
                 activeCity={activeCity}
                 activeBounds={activeBounds}
                 drivers={drivers}
@@ -199,10 +202,10 @@ export function App() {
                 <DriverCockpit
                   drivers={drivers}
                   activeTrip={activeTrip}
-                  onAcceptOffer={(driverId, reqId) =>
+                  onAcceptOffer={(driverId: string, reqId: string) =>
                     sendDriverResponse(driverId, reqId, "accepted")
                   }
-                  onRejectOffer={(driverId, reqId) =>
+                  onRejectOffer={(driverId: string, reqId: string) =>
                     sendDriverResponse(driverId, reqId, "rejected")
                   }
                   onDriverAction={sendDriverAction}

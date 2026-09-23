@@ -4,7 +4,6 @@ import path from "node:path";
 import { defineConfig } from "vite";
 
 export default defineConfig({
-  plugins: [react()],
   plugins: [react(), tailwindcss()],
   root: import.meta.dirname,
   server: {
@@ -20,6 +19,8 @@ export default defineConfig({
       "/drivers": "http://localhost:3000",
       "/config": "http://localhost:3000",
       "/simulator": "http://localhost:3000",
+      "/api": "http://localhost:3000",
+      "/metrics": "http://localhost:3000",
     },
   },
   build: {

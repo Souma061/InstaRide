@@ -103,7 +103,7 @@ public:
 // quadtree
 struct DriverRecord
 {
-    Point point;
+    Point *point;
     QuadtreeNode *leaf;
 };
 
@@ -119,6 +119,10 @@ private:
 
     bool contains(const GeoBounds &b, double lat, double lng) const
     {
+        if (std::isnan(lat) || std::isnan(lng) || std::isinf(lat) || std::isinf(lng))
+        {
+            return false;
+        }
         return (lat >= b.minLat && lat <= b.maxLat && lng >= b.minLng && lng <= b.maxLng);
     }
     QuadtreeNode *insertChild(QuadtreeNode *node, Point *point)
@@ -177,28 +181,49 @@ public:
 
     ~Quadtree()
     {
+        clear();
         delete root;
+    }
+
+    void clear()
+    {
+        for (auto &pair : driverIndex)
+        {
+            delete pair.second.point;
+        }
+        driverIndex.clear();
     }
 
     bool remove(const std::string &id)
     {
         auto itLeaf = driverIndex.find(id);
-        if (itLeaf == driverIndex.end() || !itLeaf->second.leaf)
+        if (itLeaf == driverIndex.end())
             return false;
 
         QuadtreeNode *leaf = itLeaf->second.leaf;
-        auto &pts = leaf->point;
-        for (size_t i = 0; i < pts.size(); ++i)
+        Point *ptToDelete = itLeaf->second.point;
+
+        if (leaf)
         {
-            if (pts[i]->id == id)
+            auto &pts = leaf->point;
+            for (size_t i = 0; i < pts.size(); ++i)
             {
-                pts.erase(pts.begin() + i);
-                driverIndex.erase(itLeaf);
-                return true;
+                if (pts[i]->id == id)
+                {
+                    pts.erase(pts.begin() + i);
+                    break;
+                }
             }
         }
+
+        delete ptToDelete;
         driverIndex.erase(itLeaf);
         return true;
+    }
+
+    size_t size() const
+    {
+        return driverIndex.size();
     }
 
     bool update(const std::string &id, double lat, double lng)
@@ -212,8 +237,8 @@ public:
         // Fast path: still in the same leaf bounding box
         if (contains(it->second.leaf->bounds, lat, lng))
         {
-            it->second.point.lat = lat;
-            it->second.point.lng = lng;
+            it->second.point->lat = lat;
+            it->second.point->lng = lng;
             return true;
         }
 
@@ -228,11 +253,15 @@ public:
         {
             return false;
         }
+        if (driverIndex.find(id) != driverIndex.end())
+        {
+            remove(id);
+        }
         Point *newPoint = new Point{id, lat, lng};
         QuadtreeNode *leaf = insertNode(root, newPoint);
         if (leaf)
         {
-            driverIndex[id] = {*newPoint, leaf};
+            driverIndex[id] = {newPoint, leaf};
             return true;
         }
         else
@@ -245,6 +274,10 @@ public:
     std::vector<CandidateDriver> KNearestNeighBors(double queryLat, double queryLng, int k, double maxSearchRadiusMeters = 50000.0)
     {
         std::vector<CandidateDriver> candidates;
+        if (k <= 0 || maxSearchRadiusMeters <= 0.0 || std::isnan(queryLat) || std::isnan(queryLng) || std::isnan(maxSearchRadiusMeters))
+        {
+            return candidates;
+        }
 
         // priority queue element:holds a node ptr and its min bouunding box doistance
         struct NodeCandidate
@@ -281,7 +314,7 @@ public:
                 double d = haversineDistance(queryLat, queryLng, pt->lat, pt->lng);
                 if (d <= maxSearchRadiusMeters)
                 {
-                    if ((int)candidates.size() < k || d < candidates.back().distance)
+                    if ((int)candidates.size() < k || (!candidates.empty() && d < candidates.back().distance))
                     {
                         // insert in sorted order
                         CandidateDriver cd{pt->id, pt->lat, pt->lng, d};
@@ -307,7 +340,7 @@ public:
                         double dist = minDistanceToBox(queryLat, queryLng, child->bounds);
                         if (dist <= maxSearchRadiusMeters)
                         {
-                            if ((int)candidates.size() < k || dist < candidates.back().distance)
+                            if ((int)candidates.size() < k || (!candidates.empty() && dist < candidates.back().distance))
                             {
                                 PQ.push({child, dist});
                             }
