@@ -14,19 +14,33 @@ const RELEASE_LOCK_LUA = fs.readFileSync(
   path.join(__dirname, "../infra/lua/release_lock.lua"),
   "utf8",
 );
+const ACQUIRE_LOCK_LUA = fs.readFileSync(
+  path.join(__dirname, "../infra/lua/acquire_lock.lua"),
+  "utf8",
+);
 export class RedisDriverLock {
   private lockPrefix: string = "driver_lock:";
+  private statePrefix: string = "driver:state:";
 
   public async acquireLock(
     driverId: string,
     requestId: string,
-    ttlMs: number = 15000,
+    ttlMs: number,
   ): Promise<boolean> {
-    const key = `${this.lockPrefix}${driverId}`;
-    const result = await redis.set(key, requestId, "PX", ttlMs, "NX");
-    return result === "OK";
+    const lockKey = `${this.lockPrefix}${driverId}`;
+    const stateKey = `${this.statePrefix}${driverId}`;
+    const res = (await redis.eval(
+      ACQUIRE_LOCK_LUA,
+      2,
+      lockKey,
+      stateKey,
+      requestId,
+      ttlMs.toString(),
+    )) as number;
+    return res === 1;
   }
-  //safely release the lock only if the requestId matches
+
+  // Safely release the lock only if the requestId matches
   public async releaseLock(
     driverId: string,
     requestId: string,
@@ -52,8 +66,9 @@ export class RedisDriverLock {
     driverId: string,
     requestId: string,
   ): Promise<boolean> {
+    console.log(`Committing trip for driver ${driverId} with request ID ${requestId}`);
     const lockKey = `${this.lockPrefix}${driverId}`;
-    const stateKey = `driver:state:${driverId}`;
+    const stateKey = `${this.statePrefix}${driverId}`;
     const result = await redis.eval(
       COMMI_TRIP_LUA,
       2,
@@ -71,7 +86,7 @@ export class RedisDriverLock {
     driverId: string,
     newStatus: "available" | "offline" = "available",
   ): Promise<boolean> {
-    const stateKey = `driver:state:${driverId}`;
+    const stateKey = `${this.statePrefix}${driverId}`;
 
     // Reset driver state and remove current trip reference
     await redis.hset(stateKey, {

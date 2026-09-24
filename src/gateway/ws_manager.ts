@@ -62,7 +62,9 @@ export class WsManager {
     socket.on("message", (raw: Buffer | string) => {
       try {
         const message = JSON.parse(raw.toString());
-        this.handleMessage(socket, role, clientId, message);
+        this.handleMessage(socket, role, clientId, message).catch((err) => {
+          console.error("Error handling WS message:", err);
+        });
       } catch (err) {
         this.send(socket, { type: "error", message: "Malformed JSON message" });
       }
@@ -89,12 +91,12 @@ export class WsManager {
     });
   }
 
-  private handleMessage(
+  private async handleMessage(
     socket: WebSocket,
     role: ClientRole,
     clientId: string,
     msg: any,
-  ): void {
+  ): Promise<void> {
     switch (msg.type) {
       case "ping":
         this.send(socket, { type: "pong", timestamp: Date.now() });
@@ -178,7 +180,11 @@ export class WsManager {
           return;
         }
 
-        const res = this.matchingService.cancelRide(requestId, "rider", reason);
+        const res = await this.matchingService.cancelRide(
+          requestId,
+          "rider",
+          reason,
+        );
         this.send(socket, {
           type: "ride_cancelled",
           success: res.success,
@@ -226,7 +232,8 @@ export class WsManager {
           if (driver.status !== "available") {
             this.send(socket, {
               type: "error",
-              message: "Telemetry location is outside the active operating region",
+              message:
+                "Telemetry location is outside the active operating region",
             });
             return;
           }
@@ -234,7 +241,8 @@ export class WsManager {
           if (!this.driverRegistry.updateLocation(clientId, lat, lng)) {
             this.send(socket, {
               type: "error",
-              message: "Telemetry location is outside the active operating region",
+              message:
+                "Telemetry location is outside the active operating region",
             });
             return;
           }

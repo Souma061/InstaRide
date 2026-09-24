@@ -347,6 +347,7 @@ export class MatchingService {
       );
       return;
     }
+    const LOCK_SAFETY_MARGIN_MS = 3000; // 1 second safety margin to account for network latency and processing time
 
     for (let i = 0; i < candidates.length; i++) {
       // Check if rider cancelled while loop was waiting
@@ -355,12 +356,13 @@ export class MatchingService {
       }
 
       const candidate = candidates[i];
+      const lockTtlMs = config.offerTimeoutMs + LOCK_SAFETY_MARGIN_MS;
 
       // Try acquiring atomic lock on candidate
       const locked = await this.driverRegistry.acquireLock(
         candidate.id,
         trip.requestId,
-        config.offerTimeoutMs,
+        lockTtlMs,
       );
 
       if (!locked) {
@@ -383,6 +385,7 @@ export class MatchingService {
       }
 
       if (outcome === "accepted") {
+
         // Atomic CAS commit
         const committed = await this.driverRegistry.commitTrip(
           candidate.id,
@@ -406,6 +409,12 @@ export class MatchingService {
         } else {
           // Commit failed (e.g. lock expired before commit)
           await this.driverRegistry.releaseLock(candidate.id, trip.requestId);
+          this.events.onOfferRevoked?.(
+            candidate.id,
+            trip.requestId,
+            "lock_expired_before_commit",
+          );
+          continue;
         }
       } else if (outcome === "rejected" || outcome === "timed_out") {
         // Release lock so driver returns to Quadtree for other riders

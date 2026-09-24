@@ -11,7 +11,7 @@ export type TripStatus =
 export type ActorRole = "rider" | "driver" | "system";
 
 import { isValidGeoPoint } from "../utils/validation.js";
-
+import crypto from "node:crypto";
 export interface GeoPoint {
   lat: number;
   lng: number;
@@ -123,7 +123,7 @@ export class TripStateMachine {
     }
 
     const trip: Trip = {
-      id: `trip_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      id: `trip_${crypto.randomUUID()}`,
       requestId: params.requestId,
       riderId: params.riderId,
       status: "requested",

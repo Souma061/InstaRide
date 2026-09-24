@@ -6,8 +6,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DriverRegistry } from "./core/driver_registry.js";
 import { MatchingService } from "./core/matching_service.js";
+import { RedisDriverLock } from "./core/redis_driver_lock.js";
+import { RedisTripStore } from "./core/redis_trip_store.js";
 import { TripStateMachine } from "./core/trip_state_machine.js";
 import { ClientRole, WsManager } from "./gateway/ws_manager.js";
+import { connectRedis, disconnectRedis } from "./infra/redis_client.js";
 import { metrics, register } from "./metrics/metrics.js";
 import { DriverSimulator } from "./simulation/driver_simulator.js";
 import { CppSpatialBridge } from "./spatial/cpp_spatial_bridge.js";
@@ -60,31 +63,51 @@ const fastify = Fastify({
 // Register WebSocket plugin
 await fastify.register(websocket);
 
-// 1. Initialize Core Spatial & Concurrency Pipeline
+// 1. Connect Redis & Reconcile any orphan state
+await connectRedis();
+
+const redisLock = new RedisDriverLock();
+const tripStore = new RedisTripStore();
+const cleanedOrphans = await tripStore.reconcileOrphanedTrips();
+if (cleanedOrphans > 0) {
+  console.log(
+    `🧹 [Startup] Reconciled and cleaned ${cleanedOrphans} orphaned trip locks.`,
+  );
+}
+
 let spatialIndex = new QuadTree(activeBounds, 8, 7);
-const driverRegistry = new DriverRegistry(spatialIndex);
+const driverRegistry = new DriverRegistry(spatialIndex, redisLock);
 const stateMachine = new TripStateMachine();
 const wsManager = new WsManager(driverRegistry, stateMachine);
 
-// 2. Initialize Matching Engine with Event Dispatchers
+// 2. Initialize Matching Engine with Event Dispatchers & RedisTripStore
 let simulator: DriverSimulator;
 
-const matchingService = new MatchingService(driverRegistry, stateMachine, {
-  onOfferDispatched: (notif) => {
-    wsManager.notifyDriverOffer(notif.driverId, notif);
-    simulator.handleIncomingOffer(notif.driverId, notif.requestId);
+const matchingService = new MatchingService(
+  driverRegistry,
+  stateMachine,
+  {
+    onOfferDispatched: (notif) => {
+      wsManager.notifyDriverOffer(notif.driverId, notif);
+      simulator.handleIncomingOffer(notif.driverId, notif.requestId);
+    },
+    onOfferRevoked: (driverId, requestId, reason) => {
+      wsManager.notifyOfferRevoked(driverId, requestId, reason);
+    },
+    onTripMatched: (trip, driverId) => {
+      wsManager.notifyTripMatched(trip, driverId);
+      simulator.onTripAssigned(driverId, trip);
+    },
+    onMatchFailed: (requestId, reason) => {
+      wsManager.broadcastToObservers({
+        type: "match_failed",
+        requestId,
+        reason,
+      });
+    },
   },
-  onOfferRevoked: (driverId, requestId, reason) => {
-    wsManager.notifyOfferRevoked(driverId, requestId, reason);
-  },
-  onTripMatched: (trip, driverId) => {
-    wsManager.notifyTripMatched(trip, driverId);
-    simulator.onTripAssigned(driverId, trip);
-  },
-  onMatchFailed: (requestId, reason) => {
-    wsManager.broadcastToObservers({ type: "match_failed", requestId, reason });
-  },
-});
+  tripStore,
+);
 
 // Broadcast all state machine lifecycle transitions (en_route, arrived, in_progress, completed) in real time
 stateMachine.onTransition = (event, trip) => {
@@ -419,7 +442,7 @@ fastify.post("/simulator/concurrency-race", async (req, reply) => {
   let bobAssigned: string | null = null;
 
   // 2. Both fire atomic lock acquisition simultaneously on primeCandidate
-  const aliceLockSuccess = driverRegistry.acquireLock(
+  const aliceLockSuccess = await driverRegistry.acquireLock(
     primeCandidate.id,
     aliceRequestId,
     15000,
@@ -443,7 +466,7 @@ fastify.post("/simulator/concurrency-race", async (req, reply) => {
   }
 
   // Bob attempts same primeCandidate
-  const bobLockSuccess = driverRegistry.acquireLock(
+  const bobLockSuccess = await driverRegistry.acquireLock(
     primeCandidate.id,
     bobRequestId,
     15000,
@@ -468,7 +491,7 @@ fastify.post("/simulator/concurrency-race", async (req, reply) => {
     // Bob triggers automatic fallback cascade to Candidate #2
     for (const cand of bobCandidates) {
       if (cand.id === primeCandidate.id) continue;
-      const fallbackGranted = driverRegistry.acquireLock(
+      const fallbackGranted = await driverRegistry.acquireLock(
         cand.id,
         bobRequestId,
         15000,
@@ -494,7 +517,7 @@ fastify.post("/simulator/concurrency-race", async (req, reply) => {
   if (!aliceAssigned) {
     for (const cand of aliceCandidates) {
       if (cand.id === primeCandidate.id) continue;
-      const fallbackGranted = driverRegistry.acquireLock(
+      const fallbackGranted = await driverRegistry.acquireLock(
         cand.id,
         aliceRequestId,
         15000,
@@ -653,7 +676,7 @@ fastify.post("/rides/:tripId/cancel", async (req, reply) => {
       .send({ error: "Only the trip's rider may cancel it" });
   }
 
-  const result = matchingService.cancelRide(
+  const result = await matchingService.cancelRide(
     trip.requestId,
     "rider",
     body.reason || "Cancelled via HTTP API",
@@ -800,3 +823,21 @@ try {
   fastify.log.error(err);
   process.exit(1);
 }
+
+// Graceful shutdown handling
+const gracefulShutdown = async (signal: string) => {
+  console.log(`\n🛑 Received ${signal}. Draining connections...`);
+  try {
+    simulator.stop();
+    await fastify.close();
+    await disconnectRedis();
+    console.log("👋 Clean shutdown complete.");
+    process.exit(0);
+  } catch (err) {
+    console.error("Error during shutdown:", err);
+    process.exit(1);
+  }
+};
+
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
