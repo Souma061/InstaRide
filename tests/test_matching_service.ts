@@ -301,7 +301,7 @@ async function runTests() {
     );
 
     // Rider cancels before driver can respond
-    const cancelRes = matching.cancelRide(
+    const cancelRes = await matching.cancelRide(
       "req_cancel",
       "rider",
       "Change of plans",

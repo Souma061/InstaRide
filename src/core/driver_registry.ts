@@ -1,5 +1,6 @@
 import { metrics } from "../metrics/metrics.js";
 import { CandidateDriver, QuadTree } from "../spatial/quadtree.js";
+import { RedisDriverLock } from "./redis_driver_lock.js";
 
 export type DriverStatus = "available" | "busy" | "offline";
 
@@ -18,11 +19,13 @@ export interface DriverRecord {
 }
 
 export class DriverRegistry {
-  private readonly drivers = new Map<string, DriverRecord>();
+  private readonly drivers = new Map<string, DriverRecord>(); // in memory registry of drivers for fast access
   private spatialIndex: QuadTree;
+  private readonly redisLock?: RedisDriverLock;
 
-  constructor(spatialIndex: QuadTree) {
+  constructor(spatialIndex: QuadTree, redisLock?: RedisDriverLock) {
     this.spatialIndex = spatialIndex;
+    this.redisLock = redisLock;
   }
 
   public reset(newSpatialIndex: QuadTree): void {
@@ -145,39 +148,55 @@ export class DriverRegistry {
   }
 
   // Automatic lock expiration and atomic claim
-  public acquireLock(
+  public async acquireLock(
     driverId: string,
     requestId: string,
-    ttlMs: number = 15_000,
-  ): boolean {
+    ttlMs: number = 15000,
+  ): Promise<boolean> {
     const driver = this.drivers.get(driverId);
     if (!driver || driver.status !== "available") {
       return false;
     }
-    const now = Date.now();
-    this.cleanExpiredLockIfAny(driver, now);
-    if (driver.status !== "available" || driver.lockToken) {
-      return false;
+    if (this.redisLock) {
+      const acquired = await this.redisLock.acquireLock(driverId, requestId, ttlMs);
+      if (!acquired) {
+        return false;
+      }
+    } else {
+      const now = Date.now();
+      this.cleanExpiredLockIfAny(driver, now);
+      if (driver.status !== "available" || driver.lockToken) {
+        return false;
+      }
+      driver.lockToken = {
+        requestId,
+        expiresAt: now + ttlMs,
+      };
     }
-    driver.lockToken = {
-      requestId,
-      expiresAt: now + ttlMs,
-    };
     this.spatialIndex.remove(driverId);
     return true;
   }
-
   // Safe lock release, only if requestId matches
-  public releaseLock(driverId: string, requestId: string): boolean {
+  public async releaseLock(
+    driverId: string,
+    requestId: string
+  ): Promise<boolean> {
     const driver = this.drivers.get(driverId);
-    if (
-      !driver ||
-      !driver.lockToken ||
-      driver.lockToken.requestId !== requestId
-    ) {
+    if (!driver) {
       return false;
     }
-    delete driver.lockToken;
+    if (this.redisLock) {
+      const released = await this.redisLock.releaseLock(driverId, requestId);
+      if (!released) {
+        return false;
+      }
+    } else {
+      if (!driver.lockToken || driver.lockToken.requestId !== requestId) {
+        return false;
+      }
+      delete driver.lockToken;
+    }
+    // return driver to spatial search tree if still available
     if (driver.status === "available") {
       this.spatialIndex.insert(driverId, driver.lat, driver.lng);
     }
@@ -185,30 +204,39 @@ export class DriverRegistry {
   }
 
   // Atomic trip commit: rejects if rider cancelled or lock expired
-  public commitTrip(driverId: string, requestId: string): boolean {
+  public async commitTrip(
+    driverId: string,
+    requestId: string,
+  ): Promise<boolean> {
     const driver = this.drivers.get(driverId);
-    if (
-      !driver ||
-      !driver.lockToken ||
-      driver.lockToken.requestId !== requestId
-    ) {
+    if (!driver) {
       return false;
     }
-    const now = Date.now();
-    // Offer expired
-    if (driver.lockToken.expiresAt <= now) {
-      this.releaseLock(driverId, requestId);
-      return false;
+    if (this.redisLock) {
+      const commited = await this.redisLock.commitTrip(driverId, requestId);
+      if (!commited) {
+        return false;
+      }
+    } else {
+      if (!driver.lockToken || driver.lockToken.requestId !== requestId) {
+        return false;
+      }
+      const now = Date.now();
+      if (driver.lockToken.expiresAt <= now) {
+        await this.releaseLock(driverId, requestId);
+        return false;
+      }
+      delete driver.lockToken;
     }
-    delete driver.lockToken;
     driver.status = "busy";
     return true;
   }
-
-  public completeTrip(driverId: string): boolean {
+  public async completeTrip(driverId: string): Promise<boolean> {
+    if (this.redisLock) {
+      await this.redisLock.releaseCommittedDriver(driverId, "available");
+    }
     return this.setStatus(driverId, "available");
   }
-
   public findNearbyCandidates(
     lat: number,
     lng: number,

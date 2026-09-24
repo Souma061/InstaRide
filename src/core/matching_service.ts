@@ -1,5 +1,6 @@
 import { CandidateDriver } from "../spatial/quadtree.js";
 import { DriverRegistry } from "./driver_registry.js";
+import { RedisTripStore } from "./redis_trip_store.js";
 import {
   ActorRole,
   GeoPoint,
@@ -52,6 +53,7 @@ export class MatchingService {
   private readonly driverRegistry: DriverRegistry;
   private readonly stateMachine: TripStateMachine;
   private readonly events: MatchingServiceEvents;
+  private readonly tripStore?: RedisTripStore;
 
   // Active in-flight offers mapped by requestId
   private readonly activeOffers = new Map<string, PendingOffer>();
@@ -62,10 +64,12 @@ export class MatchingService {
     driverRegistry: DriverRegistry,
     stateMachine: TripStateMachine,
     events: MatchingServiceEvents = {},
+    tripStore?: RedisTripStore,
   ) {
     this.driverRegistry = driverRegistry;
     this.stateMachine = stateMachine;
     this.events = events;
+    this.tripStore = tripStore;
   }
 
   /**
@@ -89,6 +93,14 @@ export class MatchingService {
     }
 
     const trip = tripResult.trip;
+    if (this.tripStore) {
+      const storeRes = await this.tripStore.createTrip(trip);
+      if (!storeRes.success) {
+        //rollback local state if redis rejected(e.g rider active on another node)
+        this.stateMachine.cancelTrip(trip.id, "system", storeRes.error);
+        return { success: false, error: storeRes.error };
+      }
+    }
 
     // Idempotent re-submission check: if trip is already beyond requested, return existing
     if (trip.status !== "requested") {
@@ -128,7 +140,10 @@ export class MatchingService {
     response: unknown,
   ): { success: boolean; error?: string } {
     if (response !== "accepted" && response !== "rejected") {
-      return { success: false, error: "INVALID_RESPONSE: expected accepted or rejected" };
+      return {
+        success: false,
+        error: "INVALID_RESPONSE: expected accepted or rejected",
+      };
     }
     const pendingOffer = this.activeOffers.get(requestId);
 
@@ -162,48 +177,84 @@ export class MatchingService {
   /**
    * Rider or system cancels ride. Revokes any pending driver lock immediately.
    */
-  public cancelRide(
+  // public cancelRide(
+  //   requestId: string,
+  //   cancelledBy: ActorRole = "rider",
+  //   reason?: string,
+  // ): { success: boolean; error?: string } {
+  //   this.abortedRequests.add(requestId);
+
+  //   const pendingOffer = this.activeOffers.get(requestId);
+  //   if (pendingOffer) {
+  //     clearTimeout(pendingOffer.timer);
+  //     this.activeOffers.delete(requestId);
+
+  //     // Release the driver's atomic lock and return them to the Quadtree
+  //     void
+  //     this.driverRegistry.releaseLock(pendingOffer.driverId, requestId);
+
+  //     // Notify driver client that the offer was revoked
+  //     this.events.onOfferRevoked?.(
+  //       pendingOffer.driverId,
+  //       requestId,
+  //       reason || "Rider cancelled request",
+  //     );
+
+  //     pendingOffer.resolve("cancelled");
+  //   }
+
+  //   const trip = this.stateMachine.getTripByRequestId(requestId);
+  //   if (trip) {
+  //     const assignedDriverId = trip.driverId;
+  //     const cancelRes = this.stateMachine.cancelTrip(
+  //       trip.id,
+  //       cancelledBy,
+  //       reason,
+  //     );
+  //     if (cancelRes.success && assignedDriverId) {
+  //       this.driverRegistry.completeTrip(assignedDriverId);
+  //     }
+  //     return cancelRes;
+  //   }
+
+  //   return { success: true };
+  // }
+  public async cancelRide(
     requestId: string,
     cancelledBy: ActorRole = "rider",
     reason?: string,
-  ): { success: boolean; error?: string } {
+  ): Promise<{ success: boolean; error?: string }> {
     this.abortedRequests.add(requestId);
-
     const pendingOffer = this.activeOffers.get(requestId);
     if (pendingOffer) {
       clearTimeout(pendingOffer.timer);
       this.activeOffers.delete(requestId);
-
-      // Release the driver's atomic lock and return them to the Quadtree
-      this.driverRegistry.releaseLock(pendingOffer.driverId, requestId);
-
-      // Notify driver client that the offer was revoked
+      await this.driverRegistry.releaseLock(pendingOffer.driverId, requestId);
       this.events.onOfferRevoked?.(
         pendingOffer.driverId,
         requestId,
         reason || "Rider cancelled request",
       );
-
       pendingOffer.resolve("cancelled");
     }
-
     const trip = this.stateMachine.getTripByRequestId(requestId);
     if (trip) {
       const assignedDriverId = trip.driverId;
-      const cancelRes = this.stateMachine.cancelTrip(
+      const cancelResult = this.stateMachine.cancelTrip(
         trip.id,
         cancelledBy,
         reason,
       );
-      if (cancelRes.success && assignedDriverId) {
-        this.driverRegistry.completeTrip(assignedDriverId);
+      if (cancelResult.success && assignedDriverId) {
+        await this.driverRegistry.completeTrip(assignedDriverId);
       }
-      return cancelRes;
+      if (this.tripStore) {
+        await this.tripStore.saveTrip(trip);
+      }
+      return cancelResult;
     }
-
     return { success: true };
   }
-
   /** Cancels in-flight work before replacing the spatial region. */
   public reset(reason: string = "Operating region was reset"): void {
     const activeTrips = this.stateMachine.getActiveTrips();
@@ -287,6 +338,9 @@ export class MatchingService {
         "system",
         "No available drivers in search radius",
       );
+      if (this.tripStore) {
+        await this.tripStore.saveTrip(trip);
+      }
       this.events.onMatchFailed?.(
         trip.requestId,
         "No available drivers in search radius",
@@ -303,7 +357,7 @@ export class MatchingService {
       const candidate = candidates[i];
 
       // Try acquiring atomic lock on candidate
-      const locked = this.driverRegistry.acquireLock(
+      const locked = await this.driverRegistry.acquireLock(
         candidate.id,
         trip.requestId,
         config.offerTimeoutMs,
@@ -324,13 +378,13 @@ export class MatchingService {
         this.abortedRequests.has(trip.requestId) ||
         trip.status !== "matching"
       ) {
-        this.driverRegistry.releaseLock(candidate.id, trip.requestId);
+        await this.driverRegistry.releaseLock(candidate.id, trip.requestId);
         return;
       }
 
       if (outcome === "accepted") {
         // Atomic CAS commit
-        const committed = this.driverRegistry.commitTrip(
+        const committed = await this.driverRegistry.commitTrip(
           candidate.id,
           trip.requestId,
         );
@@ -341,18 +395,21 @@ export class MatchingService {
             candidate.id,
           );
           if (matchResult.success && matchResult.trip) {
+            if (this.tripStore) {
+              await this.tripStore.saveTrip(matchResult.trip);
+            }
             this.events.onTripMatched?.(matchResult.trip, candidate.id);
             return; // Successful match!
           }
           // If setMatched failed (e.g. race condition), rollback the committed driver back to available
-          this.driverRegistry.completeTrip(candidate.id);
+          await this.driverRegistry.completeTrip(candidate.id);
         } else {
           // Commit failed (e.g. lock expired before commit)
-          this.driverRegistry.releaseLock(candidate.id, trip.requestId);
+          await this.driverRegistry.releaseLock(candidate.id, trip.requestId);
         }
       } else if (outcome === "rejected" || outcome === "timed_out") {
         // Release lock so driver returns to Quadtree for other riders
-        this.driverRegistry.releaseLock(candidate.id, trip.requestId);
+        await this.driverRegistry.releaseLock(candidate.id, trip.requestId);
 
         if (outcome === "timed_out") {
           this.events.onOfferRevoked?.(
@@ -374,6 +431,9 @@ export class MatchingService {
         "system",
         "All candidate drivers declined or timed out",
       );
+      if (this.tripStore) {
+        await this.tripStore.saveTrip(trip);
+      }
       this.events.onMatchFailed?.(
         trip.requestId,
         "All candidate drivers declined or timed out",
