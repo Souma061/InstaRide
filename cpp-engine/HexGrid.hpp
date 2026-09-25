@@ -124,6 +124,10 @@ public:
         driverIndex.clear();
         hexBuckets.clear();
     }
+    size_t size() const
+    {
+        return driverIndex.size();
+    }
     uint64_t latLngToCell(double lat, double lng)
     {
         double x, y;
