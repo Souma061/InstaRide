@@ -112,10 +112,6 @@ extern "C"
             {
                 success++;
             }
-            else if (g_hexGrid->insert(std::string(updates[i].id), updates[i].lat, updates[i].lng))
-            {
-                success++;
-            }
         }
         return success;
     }

@@ -103,10 +103,6 @@ extern "C"
             {
                 success++;
             }
-            else if (g_tree->insert(std::string(updates[i].id), updates[i].lat, updates[i].lng))
-            {
-                success++;
-            }
         }
         return success;
     }

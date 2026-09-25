@@ -1,4 +1,4 @@
-import { CppKoffiSpatialBridge as CppSpatialBridge } from "../src/spatial/cpp_koffi_spatial_bridge.js";
+import { CppSpatialBridge } from "../src/spatial/cpp_spatial_bridge.js";
 
 async function main() {
   console.log("==================================================");

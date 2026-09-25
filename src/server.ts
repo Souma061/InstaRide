@@ -13,7 +13,7 @@ import { ClientRole, WsManager } from "./gateway/ws_manager.js";
 import { connectRedis, disconnectRedis } from "./infra/redis_client.js";
 import { metrics, register } from "./metrics/metrics.js";
 import { DriverSimulator } from "./simulation/driver_simulator.js";
-import { CppKoffiSpatialBridge } from "./spatial/cpp_koffi_spatial_bridge.js";
+import { CppSpatialBridge } from "./spatial/cpp_spatial_bridge.js";
 import { CandidateDriver, GeoBounds, QuadTree } from "./spatial/quadtree.js";
 import {
   clampTimeout,
@@ -128,18 +128,21 @@ wsManager.setMatchingService(matchingService);
 simulator = new DriverSimulator(activeBounds, driverRegistry, stateMachine);
 simulator.setMatchingService(matchingService);
 
-// 3b. Initialize Native C++ Spatial Bridge (Koffi Zero-Copy FFI)
-const cppBridge = new CppKoffiSpatialBridge();
-driverRegistry.setSpatialBridge(cppBridge);
-let activeEngine: "ts" | "cpp_quadtree" | "cpp_hexgrid" = "cpp_quadtree";
-driverRegistry.setActiveEngine(activeEngine);
+// 3b. Initialize Native C++ Spatial Bridge
+const cppBridge = new CppSpatialBridge();
+let activeEngine: "ts" | "cpp" = "ts";
 
-if (cppBridge.isAvailable()) {
-  cppBridge.initRegion(activeBounds, 8, 7);
-  console.log(
-    "🚀 [Server] In-Process C++ Koffi Spatial Accelerator connected & ready! (QuadTree & HexGrid)",
-  );
-}
+cppBridge.start().then((ok) => {
+  if (ok) {
+    cppBridge.initRegion(activeBounds, 8, 7);
+    for (const d of simulator.getAllVirtualDrivers()) {
+      cppBridge.insert(d.id, d.lat, d.lng);
+    }
+    console.log(
+      "🚀 [Server] C++ Native Spatial Accelerator connected & ready!",
+    );
+  }
+});
 
 simulator.onTelemetryTick = (updates) => {
   if (cppBridge.isAvailable()) {
@@ -217,7 +220,6 @@ fastify.get("/metrics", async (req, reply) => {
 });
 
 // System Health & Spatial Engine Stats
-// System Health & Spatial Engine Stats
 fastify.get("/health", async () => {
   return {
     status: "ok",
@@ -226,8 +228,6 @@ fastify.get("/health", async () => {
     bounds: activeBounds,
     totalDrivers: driverRegistry.totalDrivers,
     quadtreeSize: spatialIndex.size(),
-    nativeEngineSize: cppBridge.isAvailable() ? cppBridge.size() : null,
-    activeEngine,
     observers: wsManager.observerCount,
     timestamp: new Date().toISOString(),
   };
@@ -240,8 +240,6 @@ fastify.get("/config", async () => {
     bounds: activeBounds,
     totalDrivers: driverRegistry.totalDrivers,
     quadtreeSize: spatialIndex.size(),
-    nativeEngineSize: cppBridge.isAvailable() ? cppBridge.size() : null,
-    activeEngine,
     observers: wsManager.observerCount,
   };
 });
@@ -300,54 +298,30 @@ fastify.post("/simulator/reset", async (req, reply) => {
 // Engine Status & Selection Endpoints
 fastify.get("/api/engine/status", async () => {
   return {
-    activeEngine: activeEngine === "ts" ? "ts" : "cpp",
-    activeEngineType: activeEngine,
+    activeEngine,
     cppAvailable: cppBridge.isAvailable(),
     lastLatencyUs: cppBridge.getLastLatencyUs(),
     totalQueries: cppBridge.getTotalQueries(),
-    availableEngines: ["ts", "cpp_quadtree", "cpp_hexgrid"],
   };
 });
 
 fastify.post("/api/engine/select", async (req, reply) => {
-  const body = (req.body || {}) as {
-    engine?: "ts" | "cpp" | "cpp_quadtree" | "cpp_hexgrid";
-  };
-  const valid = ["ts", "cpp", "cpp_quadtree", "cpp_hexgrid"];
-  if (!body.engine || !valid.includes(body.engine)) {
-    return reply
-      .status(400)
-      .send({ error: "engine must be 'ts', 'cpp', 'cpp_quadtree', or 'cpp_hexgrid'" });
+  const body = (req.body || {}) as { engine?: "ts" | "cpp" };
+  if (body.engine !== "ts" && body.engine !== "cpp") {
+    return reply.status(400).send({ error: "engine must be 'ts' or 'cpp'" });
   }
-  if (body.engine !== "ts" && !cppBridge.isAvailable()) {
+  if (body.engine === "cpp" && !cppBridge.isAvailable()) {
     return reply
       .status(503)
       .send({ error: "C++ native engine is not running" });
   }
-
-  if (body.engine === "ts") {
-    activeEngine = "ts";
-  } else if (body.engine === "cpp" || body.engine === "cpp_quadtree") {
-    activeEngine = "cpp_quadtree";
-    cppBridge.setEngine("cpp_quadtree");
-  } else if (body.engine === "cpp_hexgrid") {
-    activeEngine = "cpp_hexgrid";
-    cppBridge.setEngine("cpp_hexgrid");
-  }
-
-  driverRegistry.setActiveEngine(activeEngine);
-
+  activeEngine = body.engine;
   wsManager.broadcastToObservers({
     type: "engine_changed",
-    activeEngine: activeEngine === "ts" ? "ts" : "cpp",
-    activeEngineType: activeEngine,
+    activeEngine,
     latencyUs: cppBridge.getLastLatencyUs(),
   });
-  return {
-    status: "ok",
-    activeEngine: activeEngine === "ts" ? "ts" : "cpp",
-    activeEngineType: activeEngine,
-  };
+  return { status: "ok", activeEngine };
 });
 
 // Concurrency Race Simulation with full cryptographic & CAS evidence tracking
@@ -374,7 +348,7 @@ fastify.post("/simulator/concurrency-race", async (req, reply) => {
   // Find nearest available drivers near center using active engine
   let candidates: CandidateDriver[];
   let queryLatencyUs = 0;
-  if (activeEngine !== "ts" && cppBridge.isAvailable()) {
+  if (activeEngine === "cpp" && cppBridge.isAvailable()) {
     const res = await cppBridge.kNearestNeighbors(
       centerLat,
       centerLng,
@@ -384,9 +358,9 @@ fastify.post("/simulator/concurrency-race", async (req, reply) => {
     candidates = res.candidates;
     queryLatencyUs = res.latencyUs;
     try {
-      metrics.spatialQueryLatencyUs.observe({ engine: activeEngine }, queryLatencyUs);
+      metrics.spatialQueryLatencyUs.observe({ engine: "cpp" }, queryLatencyUs);
       metrics.knnLatencySeconds.observe(
-        { engine: activeEngine },
+        { engine: "cpp" },
         queryLatencyUs / 1_000_000,
       );
     } catch {}
@@ -587,12 +561,9 @@ fastify.post("/simulator/concurrency-race", async (req, reply) => {
         aliceAssigned === bobAssigned && aliceAssigned !== null ? 1 : 0,
       duplicateRatePercent: 0,
       casCollisionsResolved: 1,
+      isolationVerified: aliceAssigned !== bobAssigned,
       engineUsed:
-        activeEngine === "ts"
-          ? "TypeScript (V8 JIT)"
-          : activeEngine === "cpp_quadtree"
-          ? "C++ Quadtree (-O3 Koffi FFI)"
-          : "C++ HexGrid (-O3 Koffi FFI)",
+        activeEngine === "cpp" ? "C++ Native (-O3)" : "TypeScript (V8 JIT)",
       queryLatencyUs: Number(queryLatencyUs.toFixed(1)),
     },
   };

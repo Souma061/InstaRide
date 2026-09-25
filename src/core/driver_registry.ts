@@ -1,10 +1,8 @@
 import { metrics } from "../metrics/metrics.js";
 import { CandidateDriver, QuadTree } from "../spatial/quadtree.js";
 import { RedisDriverLock } from "./redis_driver_lock.js";
-import type { CppKoffiSpatialBridge } from "../spatial/cpp_koffi_spatial_bridge.js";
 
 export type DriverStatus = "available" | "busy" | "offline";
-export type SpatialEngineType = "ts" | "cpp_quadtree" | "cpp_hexgrid";
 
 export interface LockToken {
   requestId: string;
@@ -24,32 +22,10 @@ export class DriverRegistry {
   private readonly drivers = new Map<string, DriverRecord>(); // in memory registry of drivers for fast access
   private spatialIndex: QuadTree;
   private readonly redisLock?: RedisDriverLock;
-  private spatialBridge?: CppKoffiSpatialBridge;
-  private activeEngine: SpatialEngineType = "ts";
 
-  constructor(
-    spatialIndex: QuadTree,
-    redisLock?: RedisDriverLock,
-    spatialBridge?: CppKoffiSpatialBridge,
-  ) {
+  constructor(spatialIndex: QuadTree, redisLock?: RedisDriverLock) {
     this.spatialIndex = spatialIndex;
     this.redisLock = redisLock;
-    this.spatialBridge = spatialBridge;
-  }
-
-  public setSpatialBridge(bridge: CppKoffiSpatialBridge): void {
-    this.spatialBridge = bridge;
-  }
-
-  public setActiveEngine(engine: SpatialEngineType): void {
-    this.activeEngine = engine;
-    if (this.spatialBridge && engine !== "ts") {
-      this.spatialBridge.setEngine(engine);
-    }
-  }
-
-  public getActiveEngine(): SpatialEngineType {
-    return this.activeEngine;
   }
 
   public reset(newSpatialIndex: QuadTree): void {
@@ -97,9 +73,6 @@ export class DriverRegistry {
     this.drivers.set(id, record);
     if (indexedStatus === "available") {
       this.spatialIndex.insert(id, lat, lng);
-      if (this.spatialBridge?.isAvailable()) {
-        this.spatialBridge.insert(id, lat, lng);
-      }
     }
     return record;
   }
@@ -138,10 +111,7 @@ export class DriverRegistry {
       // insertion. Restore the spatial entry instead of silently accepting
       // telemetry for an undiscoverable driver.
       if (!this.spatialIndex.update(id, lat, lng)) {
-        this.spatialIndex.insert(id, lat, lng);
-      }
-      if (this.spatialBridge?.isAvailable()) {
-        this.spatialBridge.update(id, lat, lng);
+        return this.spatialIndex.insert(id, lat, lng);
       }
     }
     return true;
@@ -160,9 +130,6 @@ export class DriverRegistry {
       delete driver.lockToken;
       if (oldStatus === "available") {
         this.spatialIndex.remove(id);
-        if (this.spatialBridge?.isAvailable()) {
-          this.spatialBridge.remove(id);
-        }
       }
     } else if (!driver.lockToken) {
       if (!this.isWithinBounds(driver.lat, driver.lng)) {
@@ -173,9 +140,6 @@ export class DriverRegistry {
       if (!this.spatialIndex.insert(id, driver.lat, driver.lng)) {
         driver.status = "offline";
         return false;
-      }
-      if (this.spatialBridge?.isAvailable()) {
-        this.spatialBridge.insert(id, driver.lat, driver.lng);
       }
     } else {
       driver.status = "available";
@@ -210,9 +174,6 @@ export class DriverRegistry {
       };
     }
     this.spatialIndex.remove(driverId);
-    if (this.spatialBridge?.isAvailable()) {
-      this.spatialBridge.remove(driverId);
-    }
     return true;
   }
   // Safe lock release, only if requestId matches
@@ -238,9 +199,6 @@ export class DriverRegistry {
     // return driver to spatial search tree if still available
     if (driver.status === "available") {
       this.spatialIndex.insert(driverId, driver.lat, driver.lng);
-      if (this.spatialBridge?.isAvailable()) {
-        this.spatialBridge.insert(driverId, driver.lat, driver.lng);
-      }
     }
     return true;
   }
@@ -285,30 +243,6 @@ export class DriverRegistry {
     k: number = 4,
     maxRadiusMeters: number = 10_000,
   ): CandidateDriver[] {
-    if (
-      this.activeEngine !== "ts" &&
-      this.spatialBridge &&
-      this.spatialBridge.isAvailable()
-    ) {
-      const res = this.spatialBridge.kNearestNeighbors(
-        lat,
-        lng,
-        k,
-        maxRadiusMeters,
-      );
-      try {
-        metrics.spatialQueryLatencyUs.observe(
-          { engine: this.activeEngine },
-          res.latencyUs,
-        );
-        metrics.knnLatencySeconds.observe(
-          { engine: this.activeEngine },
-          res.latencyUs / 1_000_000,
-        );
-      } catch {}
-      return res.candidates;
-    }
-
     const t0 = performance.now();
     const result = this.spatialIndex.kNearestNeighbors(
       lat,
@@ -341,9 +275,6 @@ export class DriverRegistry {
         driver.status = "offline";
         delete driver.lockToken;
         this.spatialIndex.remove(id);
-        if (this.spatialBridge?.isAvailable()) {
-          this.spatialBridge.remove(id);
-        }
         evictIds.push(id);
       }
     }
@@ -366,9 +297,6 @@ export class DriverRegistry {
       delete driver.lockToken;
       if (driver.status === "available") {
         this.spatialIndex.insert(driver.id, driver.lat, driver.lng);
-        if (this.spatialBridge?.isAvailable()) {
-          this.spatialBridge.insert(driver.id, driver.lat, driver.lng);
-        }
       }
     }
   }
