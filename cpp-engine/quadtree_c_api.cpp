@@ -1,6 +1,8 @@
 #include "Quadtree.hpp"
 #include <cstring>
 #include <memory>
+#include <mutex>
+#include <shared_mutex>
 
 #ifdef _WIN32
 #define EXPORT __declspec(dllexport)
@@ -27,18 +29,21 @@ struct DriverUpdateC
 #pragma pack(pop)
 
 static std::unique_ptr<Quadtree> g_tree = nullptr;
+static std::shared_mutex g_tree_mutex;
 
 extern "C"
 {
 
     EXPORT void quadtree_init(double minLat, double maxLat, double minLng, double maxLng, int capacity, int maxDepth)
     {
+        std::unique_lock<std::shared_mutex> lock(g_tree_mutex);
         GeoBounds bounds = {minLat, maxLat, minLng, maxLng};
         g_tree = std::unique_ptr<Quadtree>(new Quadtree(bounds, capacity, maxDepth));
     }
 
     EXPORT bool quadtree_insert(const char *id, double lat, double lng)
     {
+        std::unique_lock<std::shared_mutex> lock(g_tree_mutex);
         if (!g_tree || !id)
             return false;
         return g_tree->insert(std::string(id), lat, lng);
@@ -46,6 +51,7 @@ extern "C"
 
     EXPORT bool quadtree_update(const char *id, double lat, double lng)
     {
+        std::unique_lock<std::shared_mutex> lock(g_tree_mutex);
         if (!g_tree || !id)
             return false;
         return g_tree->update(std::string(id), lat, lng);
@@ -53,6 +59,7 @@ extern "C"
 
     EXPORT bool quadtree_remove(const char *id)
     {
+        std::unique_lock<std::shared_mutex> lock(g_tree_mutex);
         if (!g_tree || !id)
             return false;
         return g_tree->remove(std::string(id));
@@ -60,6 +67,7 @@ extern "C"
 
     EXPORT int quadtree_size()
     {
+        std::shared_lock<std::shared_mutex> lock(g_tree_mutex);
         if (!g_tree)
             return 0;
         return (int)g_tree->size();
@@ -67,6 +75,7 @@ extern "C"
 
     EXPORT int quadtree_knn(double queryLat, double queryLng, int k, double maxRadiusMeters, CandidateC *outCandidates)
     {
+        std::shared_lock<std::shared_mutex> lock(g_tree_mutex);
         if (!g_tree || !outCandidates || k <= 0)
             return 0;
         std::vector<CandidateDriver> found = g_tree->KNearestNeighBors(queryLat, queryLng, k, maxRadiusMeters);
@@ -84,6 +93,7 @@ extern "C"
 
     EXPORT int quadtree_batch_update(int count, const DriverUpdateC *updates)
     {
+        std::unique_lock<std::shared_mutex> lock(g_tree_mutex);
         if (!g_tree || !updates || count <= 0)
             return 0;
         int success = 0;
