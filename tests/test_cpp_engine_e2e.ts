@@ -1,4 +1,4 @@
-import { CppSpatialBridge } from "../src/spatial/cpp_spatial_bridge.js";
+import { CppKoffiSpatialBridge as CppSpatialBridge } from "../src/spatial/cpp_koffi_spatial_bridge.js";
 import { DriverRegistry } from "../src/core/driver_registry.js";
 import { TripStateMachine } from "../src/core/trip_state_machine.js";
 import { DriverSimulator } from "../src/simulation/driver_simulator.js";
@@ -60,7 +60,7 @@ async function main() {
   // ---------------------------------------------------------------- E2
   console.log("\n[E2] Out-of-bounds telemetry -> does the driver survive?");
   const tsTree = new QuadTree(BOUNDS, 8, 7);
-  const registry = new DriverRegistry(tsTree);
+  const registry = new DriverRegistry(tsTree, undefined, bridge);
   registry.registerDriver("e2_d", 13.05, 77.7, "available");
   await bridge.insert("e2_d", 13.05, 77.7);
 
