@@ -20,6 +20,24 @@ xychart-beta
 
 ---
 
+## ⚠️ Re-audit Status (2026-09-26)
+
+**Regression found:** commit `34ad56a` fixed a batch of the findings below; the very next commit `b37eb89` ("refactor: streamline ride cancellation…") reverted **all of that code** while keeping this document. The fixes have been re-applied and are now guarded by `tests/test_audit_fixes.ts` §8–§12, so a re-revert fails the suite.
+
+| Status | Findings |
+|---|---|
+| ✅ Fixed **and** regression-tested | C-1, C-2, H-1, H-4, H-7, H-8, M-1 |
+| ✅ Fixed, **not** covered by a test | H-5, H-6, M-4, M-8, L-1, L-3, L-5 |
+| ⚠️ Partially mitigated | C-3 — Redis is now acquired *before* in-memory mutation (`driver_registry.ts:161-176`), but there is still no startup reconciliation of the QuadTree from Redis |
+| ❌ Still open | C-4 (see correction), C-5, H-2, H-3, H-9, M-2, M-3, M-5, M-6, M-7, L-2, L-4, plus all three Architecture concerns |
+| ❌ Still open (C++ side) | all 14 items in [cpp_audit.md](./cpp_audit.md) |
+
+**Correction to C-4:** the ".env … committed to git" claim was **wrong**. `.env` is listed in `.gitignore` and `git ls-files` returns only `.env.example` — `.env` has never been tracked in any commit. The real residual issue is narrower: your local `.env` ships an empty `REDIS_PASSWORD=`. Treat the rest of C-4 as invalid.
+
+**Newly found, not in the original list:** `CppSpatialBridge.stop()` could crash the host Node process via an unhandled `EPIPE` stream error. Fixed during the restore.
+
+---
+
 ## 🔴 CRITICAL Findings
 
 ### C-1: Command Injection via C++ IPC Bridge
@@ -75,20 +93,23 @@ The `releaseLock()` path (L188-203) similarly has a window where Redis releases 
 
 ---
 
-### C-4: `.env` File Contains Empty `REDIS_PASSWORD` — Committed to Git
+### C-4: `.env` File Ships an Empty `REDIS_PASSWORD`
 | | |
 |---|---|
 | **File** | [.env](file:///d:/MyWorkspace/Projects/RT_Ride_Matching_System/.env#L9) |
 | **Line** | 9 |
-| **Category** | Security — Credential Exposure |
+| **Category** | Security — Weak Configuration |
 
-**Description:** The `.env` file has `REDIS_PASSWORD=` (empty) and is tracked in git. The `.env.example` is identical (317 bytes both). This means:
-1. Production Redis has **no authentication** by default.
-2. If a real password is ever set, it risks being committed.
+> **Corrected 2026-09-26:** the original claim that this file is *committed to git* was false — `.env` is in `.gitignore` and has never been tracked. Only `.env.example` is committed. The finding is downgraded to a local-configuration issue.
 
-**Impact:** Unauthenticated Redis access allows data exfiltration, key manipulation, and `FLUSHALL`.
+**Description:** The local `.env` has `REDIS_PASSWORD=` (empty). `.env.example` is identical (317 bytes both), so a fresh clone inherits the same empty value and:
 
-**Fix:** Add `.env` to `.gitignore`. Set a strong `REDIS_PASSWORD` in production. Enable Redis `requirepass`.
+1. Development/staging Redis runs with **no authentication** by default.
+2. `docker-compose.monitoring.yml` and `redis_client.ts` never enable `requirepass`.
+
+**Impact:** If the Redis port is reachable beyond localhost, unauthenticated access allows data exfiltration, key manipulation, and `FLUSHALL`.
+
+**Fix:** Set a strong `REDIS_PASSWORD` in every non-local environment and enable Redis `requirepass`. Keep `.env` gitignored (it already is) — do not add real secrets to `.env.example`.
 
 ---
 
@@ -450,7 +471,7 @@ The `TripStateMachine`, `DriverRegistry`, and `MatchingService` all maintain in-
 | C-1 | 🔴 CRITICAL | Security | `cpp_spatial_bridge.ts` | Command injection via IPC |
 | C-2 | 🔴 CRITICAL | Error Handling | `cpp_spatial_bridge.ts` | Parse error desyncs entire pending queue |
 | C-3 | 🔴 CRITICAL | Concurrency | `driver_registry.ts` | In-memory/Redis split-brain on locks |
-| C-4 | 🔴 CRITICAL | Security | `.env` | Empty Redis password committed to git |
+| C-4 | 🔴 CRITICAL | Security | `.env` | Empty `REDIS_PASSWORD` *(corrected: never committed to git)* |
 | C-5 | 🔴 CRITICAL | Security | `server.ts` | WebSocket role/ID spoofing — no auth |
 | H-1 | 🟠 HIGH | Memory Leak | `cpp_spatial_bridge.ts` | Pending promises leaked on process exit |
 | H-2 | 🟠 HIGH | Security — DoS | `ws_manager.ts` | No rate limiting or message size limits |
@@ -479,8 +500,10 @@ The `TripStateMachine`, `DriverRegistry`, and `MatchingService` all maintain in-
 
 ## Recommended Priority Order
 
-1. **Immediate (Before any deployment):** C-4, C-5, C-1 — Security vulnerabilities
-2. **This sprint:** C-2, C-3, H-1, H-6, M-3 — Data integrity & silent failures
-3. **Next sprint:** H-2, H-3, H-7, H-8, M-1, M-2 — DoS prevention & memory leaks
-4. **Backlog:** H-4, H-5, H-9, M-4, M-5, M-7, M-8 — Performance & correctness
-5. **Cleanup:** L-1 through L-5 — Code quality
+*Rewritten 2026-09-26 to cover only what is still open — C-1, C-2, H-1, H-4 through H-8, M-1, M-4, M-8 and L-1/L-3/L-5 are fixed and regression-tested.*
+
+1. **Immediate (Before any deployment):** C-5 (WebSocket role spoofing), C-4 (enable Redis `requirepass` before the port is reachable)
+2. **This sprint:** C-3 (startup reconciliation of QuadTree from Redis), M-3 (`release_lock.lua` doesn't reset `driver:state`), M-7 (`handleDriverCancellation` bypasses the state machine)
+3. **Next sprint:** H-2 (WS rate limits / `maxPayload`), H-3 (ping-pong heartbeat), H-9 (KNN early exit), M-2 (missing TTLs on trip keys)
+4. **Backlog:** M-5 (Grafana credentials), M-6 (empty `cpp_koffi_spatial_bridge.ts`), all three Architecture concerns, and all 14 items in `cpp_audit.md`
+5. **Cleanup:** L-2 (duplicate `GeoPoint`), L-4 (empty `scripts_check_redis.ts`)

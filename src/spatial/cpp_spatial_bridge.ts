@@ -54,6 +54,14 @@ export class CppSpatialBridge {
         throw new Error("Failed to open stdio pipes to C++ engine bridge");
       }
 
+      // Writes can land after the engine dies (e.g. QUIT immediately before
+      // kill()). EPIPE surfaces asynchronously as a stream 'error' event,
+      // which is fatal to the host process unless it is handled here.
+      this.process.stdin.on("error", (err) => {
+        console.warn(`[CppSpatialBridge] stdin write failed: ${err.message}`);
+        this.drainPendingQueue(`stdin write failed: ${err.message}`);
+      });
+
       this.rl = readline.createInterface({
         input: this.process.stdout,
         crlfDelay: Infinity,

@@ -113,7 +113,14 @@ export class RedisTripStore {
   ): Promise<number> {
     const now = Date.now();
     const activeTripIds = await redis.smembers(this.activeTripSetKey);
-    const riderKeys = await redis.keys(`${this.riderActivePrefix}*`);
+    // Non-blocking SCAN instead of KEYS so large keyspaces don't stall Redis (audit M-4)
+    const riderKeys: string[] = [];
+    for await (const batch of redis.scanStream({
+      match: `${this.riderActivePrefix}*`,
+      count: 100,
+    })) {
+      riderKeys.push(...(batch as string[]));
+    }
     let cleaned = 0;
 
     for (const riderKey of riderKeys) {
