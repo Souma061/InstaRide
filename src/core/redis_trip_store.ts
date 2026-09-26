@@ -33,6 +33,44 @@ export class RedisTripStore {
    * Atomically registers a new trip in Redis.
    * Guarantees idempotency and single-active trip per rider.
    */
+  // public async createTrip(trip: Trip): Promise<{
+  //   success: boolean;
+  //   trip?: Trip;
+  //   error?: string;
+  // }> {
+  //   // 1. Idempotency Check: if requestId was already submitted, return existing trip
+  //   const existingTripId = await redis.get(
+  //     `${this.requestPrefix}${trip.requestId}`,
+  //   );
+  //   if (existingTripId) {
+  //     const existing = await this.getTrip(existingTripId);
+  //     if (existing) {
+  //       return { success: true, trip: existing };
+  //     }
+  //   }
+
+  //   // 2. Rider Active Check: ensure rider doesn't already have an in-flight trip
+  //   const riderLockKey = `${this.riderActivePrefix}${trip.riderId}`;
+  //   const acquired = await redis.set(riderLockKey, trip.id, "NX");
+  //   if (!acquired) {
+  //     return {
+  //       success: false,
+  //       error: `Rider ${trip.riderId} already has an active trip.`,
+  //     };
+  //   }
+
+  //   // 3. Atomically save Trip, Request mapping, and add to active trips set
+  //   const tripKey = `${this.tripPrefix}${trip.id}`;
+  //   const requestKey = `${this.requestPrefix}${trip.requestId}`;
+  //   const pipeline = redis.pipeline();
+  //   pipeline.set(tripKey, JSON.stringify(trip));
+  //   pipeline.set(requestKey, trip.id);
+  //   pipeline.sadd(this.activeTripSetKey, trip.id);
+  //   await pipeline.exec();
+
+  //   return { success: true, trip };
+  // }
+
   public async createTrip(trip: Trip): Promise<{
     success: boolean;
     trip?: Trip;
@@ -55,7 +93,7 @@ export class RedisTripStore {
       RIDER_ACTIVE_SAFETY_TTL_SEC.toString(),
     )) as [number, string | null];
     const [code, val] = result;
-    // code 1: idempotency network retry
+    // code 1:idempotency network retry
     if (code === 1) {
       const existing = await this.getTrip(val!);
       if (existing) {
@@ -70,26 +108,13 @@ export class RedisTripStore {
     }
     return { success: true, trip };
   }
-
   public async reconcileOrphanedTrips(
     maxStaleMatchingAgeMs: number = 60_000,
   ): Promise<number> {
     const now = Date.now();
     const activeTripIds = await redis.smembers(this.activeTripSetKey);
+    const riderKeys = await redis.keys(`${this.riderActivePrefix}*`);
     let cleaned = 0;
-
-    // Use non-blocking SCAN iterator to avoid blocking Redis event loop
-    const stream = redis.scanStream({
-      match: `${this.riderActivePrefix}*`,
-      count: 100,
-    });
-
-    const riderKeys: string[] = [];
-    for await (const resultKeys of stream) {
-      for (const k of resultKeys as string[]) {
-        riderKeys.push(k);
-      }
-    }
 
     for (const riderKey of riderKeys) {
       const tripId = await redis.get(riderKey);
@@ -106,15 +131,13 @@ export class RedisTripStore {
           const trip = JSON.parse(raw) as Trip;
           const isTerminal =
             trip.status === "completed" || trip.status === "cancelled";
-          const isAbandonedMatching =
-            (trip.status === "requested" || trip.status === "matching") &&
-            now - trip.createdAt > maxStaleMatchingAgeMs;
+          const isStale = now - trip.createdAt > maxStaleMatchingAgeMs;
 
-          if (isTerminal || isAbandonedMatching) {
-            if (isAbandonedMatching) {
+          if (isTerminal || isStale) {
+            if (!isTerminal) {
               trip.status = "cancelled";
               trip.cancellationReason =
-                "Abandoned due to server crash or matching timeout";
+                "Abandoned due to server restart or timeout";
               trip.cancelledAt = now;
               await redis.set(
                 `${this.tripPrefix}${tripId}`,
@@ -129,9 +152,37 @@ export class RedisTripStore {
       }
     }
 
+    for (const tripId of activeTripIds) {
+      const raw = await redis.get(`${this.tripPrefix}${tripId}`);
+      if (!raw) {
+        await redis.srem(this.activeTripSetKey, tripId);
+        cleaned++;
+      } else {
+        const trip = JSON.parse(raw) as Trip;
+        const isTerminal =
+          trip.status === "completed" || trip.status === "cancelled";
+        const isStale = now - trip.createdAt > maxStaleMatchingAgeMs;
+
+        if (isTerminal || isStale) {
+          if (!isTerminal) {
+            trip.status = "cancelled";
+            trip.cancellationReason =
+              "Abandoned due to server restart or timeout";
+            trip.cancelledAt = now;
+            await redis.set(
+              `${this.tripPrefix}${tripId}`,
+              JSON.stringify(trip),
+            );
+          }
+          await redis.srem(this.activeTripSetKey, tripId);
+          await redis.del(`${this.riderActivePrefix}${trip.riderId}`);
+          cleaned++;
+        }
+      }
+    }
+
     return cleaned;
   }
-
   /**
    * Retrieves a trip by its unique ID.
    */

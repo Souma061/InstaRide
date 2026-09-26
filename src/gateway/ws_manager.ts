@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import { WebSocket } from "ws";
 import { DriverRegistry } from "../core/driver_registry.js";
 import { MatchingService } from "../core/matching_service.js";
@@ -127,7 +126,7 @@ export class WsManager {
 
         this.matchingService
           .requestRide({
-            requestId: requestId || `req_${crypto.randomUUID()}`,
+            requestId: requestId || `req_${Date.now()}`,
             riderId: clientId,
             pickup,
             dropoff,

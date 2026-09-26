@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import Fastify from "fastify";
@@ -90,9 +89,7 @@ const matchingService = new MatchingService(
   {
     onOfferDispatched: (notif) => {
       wsManager.notifyDriverOffer(notif.driverId, notif);
-      if (notif.driverId.startsWith("sim_driver_")) {
-        simulator.handleIncomingOffer(notif.driverId, notif.requestId);
-      }
+      simulator.handleIncomingOffer(notif.driverId, notif.requestId);
     },
     onOfferRevoked: (driverId, requestId, reason) => {
       wsManager.notifyOfferRevoked(driverId, requestId, reason);
@@ -196,20 +193,17 @@ if (fs.existsSync(distAssetsPath)) {
   });
 }
 
-// Cache HTML templates in memory to avoid blocking readFileSync on high-frequency HTTP requests
-const distHtmlPath = path.resolve(__dirname, "../frontend/dist/index.html");
-const fallbackHtmlPath = path.resolve(__dirname, "../ride_matching_visualizer.html");
-const cachedIndexHtml = fs.existsSync(distHtmlPath)
-  ? fs.readFileSync(distHtmlPath, "utf-8")
-  : fs.existsSync(fallbackHtmlPath)
-    ? fs.readFileSync(fallbackHtmlPath, "utf-8")
-    : null;
-
 // Serve the live visualizer UI directly at root /
 fastify.get("/", async (req, reply) => {
-  if (cachedIndexHtml) {
+  const distHtml = path.resolve(__dirname, "../frontend/dist/index.html");
+  if (fs.existsSync(distHtml)) {
     reply.type("text/html");
-    return cachedIndexHtml;
+    return fs.readFileSync(distHtml, "utf-8");
+  }
+  const htmlPath = path.resolve(__dirname, "../ride_matching_visualizer.html");
+  if (fs.existsSync(htmlPath)) {
+    reply.type("text/html");
+    return fs.readFileSync(htmlPath, "utf-8");
   }
   return {
     status: "ok",
@@ -219,9 +213,10 @@ fastify.get("/", async (req, reply) => {
 
 // Serve the dashboard SPA directly at /dashboard
 fastify.get("/dashboard", async (req, reply) => {
-  if (cachedIndexHtml) {
+  const distHtml = path.resolve(__dirname, "../frontend/dist/index.html");
+  if (fs.existsSync(distHtml)) {
     reply.type("text/html");
-    return cachedIndexHtml;
+    return fs.readFileSync(distHtml, "utf-8");
   }
   return reply.redirect("/");
 });
@@ -653,7 +648,7 @@ fastify.post("/rides", async (req, reply) => {
 
   const t0 = performance.now();
   const result = await matchingService.requestRide({
-    requestId: body.requestId || `req_${crypto.randomUUID()}`,
+    requestId: body.requestId || `req_${Date.now()}`,
     riderId: body.riderId,
     pickup: body.pickup,
     dropoff: body.dropoff,
@@ -842,7 +837,6 @@ const gracefulShutdown = async (signal: string) => {
   console.log(`\n🛑 Received ${signal}. Draining connections...`);
   try {
     simulator.stop();
-    cppBridge.stop();
     await fastify.close();
     await disconnectRedis();
     console.log("👋 Clean shutdown complete.");

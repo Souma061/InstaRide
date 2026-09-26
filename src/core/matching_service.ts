@@ -177,6 +177,48 @@ export class MatchingService {
   /**
    * Rider or system cancels ride. Revokes any pending driver lock immediately.
    */
+  // public cancelRide(
+  //   requestId: string,
+  //   cancelledBy: ActorRole = "rider",
+  //   reason?: string,
+  // ): { success: boolean; error?: string } {
+  //   this.abortedRequests.add(requestId);
+
+  //   const pendingOffer = this.activeOffers.get(requestId);
+  //   if (pendingOffer) {
+  //     clearTimeout(pendingOffer.timer);
+  //     this.activeOffers.delete(requestId);
+
+  //     // Release the driver's atomic lock and return them to the Quadtree
+  //     void
+  //     this.driverRegistry.releaseLock(pendingOffer.driverId, requestId);
+
+  //     // Notify driver client that the offer was revoked
+  //     this.events.onOfferRevoked?.(
+  //       pendingOffer.driverId,
+  //       requestId,
+  //       reason || "Rider cancelled request",
+  //     );
+
+  //     pendingOffer.resolve("cancelled");
+  //   }
+
+  //   const trip = this.stateMachine.getTripByRequestId(requestId);
+  //   if (trip) {
+  //     const assignedDriverId = trip.driverId;
+  //     const cancelRes = this.stateMachine.cancelTrip(
+  //       trip.id,
+  //       cancelledBy,
+  //       reason,
+  //     );
+  //     if (cancelRes.success && assignedDriverId) {
+  //       this.driverRegistry.completeTrip(assignedDriverId);
+  //     }
+  //     return cancelRes;
+  //   }
+
+  //   return { success: true };
+  // }
   public async cancelRide(
     requestId: string,
     cancelledBy: ActorRole = "rider",
@@ -213,7 +255,6 @@ export class MatchingService {
     }
     return { success: true };
   }
-
   /** Cancels in-flight work before replacing the spatial region. */
   public async reset(
     reason: string = "Operating region was reset",
@@ -223,13 +264,10 @@ export class MatchingService {
       this.abortedRequests.add(trip.requestId);
     }
 
-    const releasePromises: Promise<any>[] = [];
     for (const [requestId, offer] of this.activeOffers) {
       clearTimeout(offer.timer);
       this.activeOffers.delete(requestId);
-      releasePromises.push(
-        this.driverRegistry.releaseLock(offer.driverId, requestId),
-      );
+      await this.driverRegistry.releaseLock(offer.driverId, requestId);
       this.events.onOfferRevoked?.(offer.driverId, requestId, reason);
       offer.resolve("cancelled");
     }
@@ -238,16 +276,12 @@ export class MatchingService {
       const assignedDriverId = trip.driverId;
       const result = this.stateMachine.cancelTrip(trip.id, "system", reason);
       if (result.success && assignedDriverId) {
-        releasePromises.push(
-          this.driverRegistry.completeTrip(assignedDriverId),
-        );
+        await this.driverRegistry.completeTrip(assignedDriverId);
       }
       if (this.tripStore) {
-        releasePromises.push(this.tripStore.saveTrip(trip));
+        await this.tripStore.saveTrip(trip);
       }
     }
-
-    await Promise.allSettled(releasePromises);
   }
 
   /**
@@ -318,110 +352,106 @@ export class MatchingService {
       );
       return;
     }
-    const LOCK_SAFETY_MARGIN_MS = 3000; // 3 second safety margin to account for network latency and processing time
+    const LOCK_SAFETY_MARGIN_MS = 3000; // 1 second safety margin to account for network latency and processing time
 
-    try {
-      for (let i = 0; i < candidates.length; i++) {
-        // Check if rider cancelled while loop was waiting
-        if (this.abortedRequests.has(trip.requestId)) {
-          return;
-        }
+    for (let i = 0; i < candidates.length; i++) {
+      // Check if rider cancelled while loop was waiting
+      if (this.abortedRequests.has(trip.requestId)) {
+        return;
+      }
 
-        const candidate = candidates[i];
-        const lockTtlMs = config.offerTimeoutMs + LOCK_SAFETY_MARGIN_MS;
+      const candidate = candidates[i];
+      const lockTtlMs = config.offerTimeoutMs + LOCK_SAFETY_MARGIN_MS;
 
-        // Try acquiring atomic lock on candidate
-        const locked = await this.driverRegistry.acquireLock(
+      // Try acquiring atomic lock on candidate
+      const locked = await this.driverRegistry.acquireLock(
+        candidate.id,
+        trip.requestId,
+        lockTtlMs,
+      );
+
+      if (!locked) {
+        // Driver was claimed by competing request or became unavailable
+        continue;
+      }
+
+      // Wait for driver response, timeout, or cancellation
+      const outcome = await this.awaitCandidateOffer(
+        candidate,
+        trip,
+        config.offerTimeoutMs,
+      );
+      if (
+        this.abortedRequests.has(trip.requestId) ||
+        trip.status !== "matching"
+      ) {
+        await this.driverRegistry.releaseLock(candidate.id, trip.requestId);
+        return;
+      }
+
+      if (outcome === "accepted") {
+
+        // Atomic CAS commit
+        const committed = await this.driverRegistry.commitTrip(
           candidate.id,
           trip.requestId,
-          lockTtlMs,
         );
 
-        if (!locked) {
-          // Driver was claimed by competing request or became unavailable
-          continue;
-        }
-
-        // Wait for driver response, timeout, or cancellation
-        const outcome = await this.awaitCandidateOffer(
-          candidate,
-          trip,
-          config.offerTimeoutMs,
-        );
-        if (
-          this.abortedRequests.has(trip.requestId) ||
-          trip.status !== "matching"
-        ) {
+        if (committed) {
+          const matchResult = this.stateMachine.setMatched(
+            trip.id,
+            candidate.id,
+          );
+          if (matchResult.success && matchResult.trip) {
+            if (this.tripStore) {
+              await this.tripStore.saveTrip(matchResult.trip);
+            }
+            this.events.onTripMatched?.(matchResult.trip, candidate.id);
+            return; // Successful match!
+          }
+          // If setMatched failed (e.g. race condition), rollback the committed driver back to available
+          await this.driverRegistry.completeTrip(candidate.id);
+        } else {
+          // Commit failed (e.g. lock expired before commit)
           await this.driverRegistry.releaseLock(candidate.id, trip.requestId);
-          return;
-        }
-
-        if (outcome === "accepted") {
-          // Atomic CAS commit
-          const committed = await this.driverRegistry.commitTrip(
+          this.events.onOfferRevoked?.(
             candidate.id,
             trip.requestId,
+            "lock_expired_before_commit",
           );
-
-          if (committed) {
-            const matchResult = this.stateMachine.setMatched(
-              trip.id,
-              candidate.id,
-            );
-            if (matchResult.success && matchResult.trip) {
-              if (this.tripStore) {
-                await this.tripStore.saveTrip(matchResult.trip);
-              }
-              this.events.onTripMatched?.(matchResult.trip, candidate.id);
-              return; // Successful match!
-            }
-            // If setMatched failed (e.g. race condition), rollback the committed driver back to available
-            await this.driverRegistry.completeTrip(candidate.id);
-          } else {
-            // Commit failed (e.g. lock expired before commit)
-            await this.driverRegistry.releaseLock(candidate.id, trip.requestId);
-            this.events.onOfferRevoked?.(
-              candidate.id,
-              trip.requestId,
-              "lock_expired_before_commit",
-            );
-            continue;
-          }
-        } else if (outcome === "rejected" || outcome === "timed_out") {
-          // Release lock so driver returns to Quadtree for other riders
-          await this.driverRegistry.releaseLock(candidate.id, trip.requestId);
-
-          if (outcome === "timed_out") {
-            this.events.onOfferRevoked?.(
-              candidate.id,
-              trip.requestId,
-              "Offer timed out",
-            );
-          }
-          // Loop proceeds immediately to candidate #i+1 (fallback)
-        } else if (outcome === "cancelled") {
-          return;
+          continue;
         }
-      }
+      } else if (outcome === "rejected" || outcome === "timed_out") {
+        // Release lock so driver returns to Quadtree for other riders
+        await this.driverRegistry.releaseLock(candidate.id, trip.requestId);
 
-      // If loop finishes with no driver accepting
-      if (!this.abortedRequests.has(trip.requestId)) {
-        this.stateMachine.cancelTrip(
-          trip.id,
-          "system",
-          "All candidate drivers declined or timed out",
-        );
-        if (this.tripStore) {
-          await this.tripStore.saveTrip(trip);
+        if (outcome === "timed_out") {
+          this.events.onOfferRevoked?.(
+            candidate.id,
+            trip.requestId,
+            "Offer timed out",
+          );
         }
-        this.events.onMatchFailed?.(
-          trip.requestId,
-          "All candidate drivers declined or timed out",
-        );
+        // Loop proceeds immediately to candidate #i+1 (fallback)
+      } else if (outcome === "cancelled") {
+        return;
       }
-    } finally {
-      // Prevent unbounded memory growth under continuous load
-      this.abortedRequests.delete(trip.requestId);
+    }
+
+    // If loop finishes with no driver accepting
+    if (!this.abortedRequests.has(trip.requestId)) {
+      this.stateMachine.cancelTrip(
+        trip.id,
+        "system",
+        "All candidate drivers declined or timed out",
+      );
+      if (this.tripStore) {
+        await this.tripStore.saveTrip(trip);
+      }
+      this.events.onMatchFailed?.(
+        trip.requestId,
+        "All candidate drivers declined or timed out",
+      );
     }
   }
 
