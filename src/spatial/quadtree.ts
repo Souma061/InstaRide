@@ -71,10 +71,16 @@ export class QuadTreeNode {
   public ne: QuadTreeNode | null = null;
   public sw: QuadTreeNode | null = null;
   public se: QuadTreeNode | null = null;
+  public parent: QuadTreeNode | null = null;
 
-  constructor(bounds: GeoBounds, depth: number) {
+  constructor(
+    bounds: GeoBounds,
+    depth: number,
+    parent: QuadTreeNode | null = null,
+  ) {
     this.bounds = bounds;
     this.depth = depth;
+    this.parent = parent;
   }
 
   public subdivide(): void {
@@ -89,6 +95,7 @@ export class QuadTreeNode {
         maxLng: midLng,
       },
       this.depth + 1,
+      this,
     );
     this.ne = new QuadTreeNode(
       {
@@ -98,6 +105,7 @@ export class QuadTreeNode {
         maxLng: this.bounds.maxLng,
       },
       this.depth + 1,
+      this,
     );
     this.sw = new QuadTreeNode(
       {
@@ -107,6 +115,7 @@ export class QuadTreeNode {
         maxLng: midLng,
       },
       this.depth + 1,
+      this,
     );
     this.se = new QuadTreeNode(
       {
@@ -116,6 +125,7 @@ export class QuadTreeNode {
         maxLng: this.bounds.maxLng,
       },
       this.depth + 1,
+      this,
     );
 
     this.isDivided = true;
@@ -159,7 +169,6 @@ export class QuadTree {
   public readonly capacity: number;
   public readonly maxDepth: number;
   private readonly driverMap = new Map<string, Point>();
-
   private readonly driverLeaves = new Map<string, QuadTreeNode>();
 
   /**
@@ -289,7 +298,51 @@ export class QuadTree {
     this.driverMap.delete(id);
     this.driverLeaves.delete(id);
 
+    // Memory optimization: collapse parent if all sibling quadrants become empty
+    this.tryCollapse(leaf.parent);
+
     return true;
+  }
+
+  private tryCollapse(node: QuadTreeNode | null): void {
+    if (!node || !node.isDivided) return;
+
+    const nw = node.nw!;
+    const ne = node.ne!;
+    const sw = node.sw!;
+    const se = node.se!;
+
+    // Can only collapse if all children are undivided leaves
+    if (nw.isDivided || ne.isDivided || sw.isDivided || se.isDivided) {
+      return;
+    }
+
+    const totalPoints =
+      nw.points.length + ne.points.length + sw.points.length + se.points.length;
+
+    if (totalPoints <= this.capacity) {
+      // Gather all points into parent and collapse children
+      const allPoints = [
+        ...nw.points,
+        ...ne.points,
+        ...sw.points,
+        ...se.points,
+      ];
+      node.points = allPoints;
+      node.isDivided = false;
+      node.nw = null;
+      node.ne = null;
+      node.sw = null;
+      node.se = null;
+
+      // Update cached leaf pointers
+      for (const p of allPoints) {
+        this.driverLeaves.set(p.id, node);
+      }
+
+      // Propagate collapse up the tree
+      this.tryCollapse(node.parent);
+    }
   }
 
   /**

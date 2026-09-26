@@ -66,7 +66,6 @@ export class RedisDriverLock {
     driverId: string,
     requestId: string,
   ): Promise<boolean> {
-    console.log(`Committing trip for driver ${driverId} with request ID ${requestId}`);
     const lockKey = `${this.lockPrefix}${driverId}`;
     const stateKey = `${this.statePrefix}${driverId}`;
     const result = await redis.eval(
@@ -75,7 +74,7 @@ export class RedisDriverLock {
       lockKey,
       stateKey,
       requestId,
-    ); // redis.eval takes the script, number of keys, followed by the keys and arguments. In this case, we have 2 keys: lockKey and stateKey, and one argument: requestId
+    );
     return Number(result) === 1;
   }
   /**
