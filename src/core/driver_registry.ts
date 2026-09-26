@@ -18,14 +18,50 @@ export interface DriverRecord {
   lastSeen: number; // timestamp in milliseconds
 }
 
+// Structural subset of a spatial index that can shadow the primary one
+// (e.g. the C++ bridge). Return type is unknown because some mirrors are async.
+export interface SpatialIndexMirror {
+  insert(id: string, lat: number, lng: number): unknown;
+  update(id: string, lat: number, lng: number): unknown;
+  remove(id: string): unknown;
+}
+
 export class DriverRegistry {
   private readonly drivers = new Map<string, DriverRecord>(); // in memory registry of drivers for fast access
   private spatialIndex: QuadTree;
   private readonly redisLock?: RedisDriverLock;
+  private mirror?: SpatialIndexMirror;
 
   constructor(spatialIndex: QuadTree, redisLock?: RedisDriverLock) {
     this.spatialIndex = spatialIndex;
     this.redisLock = redisLock;
+  }
+
+  // Keeps a secondary index (C++ accelerator) in lockstep with the primary one,
+  // so FR10 available-only holds on whichever engine answers the k-NN query.
+  public setMirror(mirror: SpatialIndexMirror): void {
+    this.mirror = mirror;
+  }
+
+  private idxInsert(id: string, lat: number, lng: number): boolean {
+    const ok = this.spatialIndex.insert(id, lat, lng);
+    if (ok) this.sink(this.mirror?.insert(id, lat, lng));
+    return ok;
+  }
+
+  private idxUpdate(id: string, lat: number, lng: number): boolean {
+    const ok = this.spatialIndex.update(id, lat, lng);
+    if (ok) this.sink(this.mirror?.update(id, lat, lng));
+    return ok;
+  }
+
+  private idxRemove(id: string): void {
+    this.spatialIndex.remove(id);
+    this.sink(this.mirror?.remove(id));
+  }
+
+  private sink(result: unknown): void {
+    void Promise.resolve(result).catch(() => {});
   }
 
   public reset(newSpatialIndex: QuadTree): void {
@@ -72,7 +108,7 @@ export class DriverRegistry {
     };
     this.drivers.set(id, record);
     if (indexedStatus === "available") {
-      this.spatialIndex.insert(id, lat, lng);
+      this.idxInsert(id, lat, lng);
     }
     return record;
   }
@@ -110,8 +146,8 @@ export class DriverRegistry {
       // A driver can be absent after a region reset or a previously failed
       // insertion. Restore the spatial entry instead of silently accepting
       // telemetry for an undiscoverable driver.
-      if (!this.spatialIndex.update(id, lat, lng)) {
-        return this.spatialIndex.insert(id, lat, lng);
+      if (!this.idxUpdate(id, lat, lng)) {
+        return this.idxInsert(id, lat, lng);
       }
     }
     return true;
@@ -129,7 +165,7 @@ export class DriverRegistry {
       driver.status = newStatus;
       delete driver.lockToken;
       if (oldStatus === "available") {
-        this.spatialIndex.remove(id);
+        this.idxRemove(id);
       }
     } else if (!driver.lockToken) {
       if (!this.isWithinBounds(driver.lat, driver.lng)) {
@@ -137,7 +173,7 @@ export class DriverRegistry {
         return false;
       }
       driver.status = "available";
-      if (!this.spatialIndex.insert(id, driver.lat, driver.lng)) {
+      if (!this.idxInsert(id, driver.lat, driver.lng)) {
         driver.status = "offline";
         return false;
       }
@@ -173,7 +209,7 @@ export class DriverRegistry {
       requestId,
       expiresAt: now + ttlMs,
     };
-    this.spatialIndex.remove(driverId);
+    this.idxRemove(driverId);
     return true;
   }
   // Safe lock release, only if requestId matches
@@ -200,7 +236,7 @@ export class DriverRegistry {
     delete driver.lockToken;
     // return driver to spatial search tree if still available
     if (driver.status === "available") {
-      this.spatialIndex.insert(driverId, driver.lat, driver.lng);
+      this.idxInsert(driverId, driver.lat, driver.lng);
     }
     return true;
   }
@@ -276,7 +312,7 @@ export class DriverRegistry {
       ) {
         driver.status = "offline";
         delete driver.lockToken;
-        this.spatialIndex.remove(id);
+        this.idxRemove(id);
         evictIds.push(id);
       }
     }
@@ -298,7 +334,7 @@ export class DriverRegistry {
     if (driver.lockToken && driver.lockToken.expiresAt <= now) {
       delete driver.lockToken;
       if (driver.status === "available") {
-        this.spatialIndex.insert(driver.id, driver.lat, driver.lng);
+        this.idxInsert(driver.id, driver.lat, driver.lng);
       }
     }
   }

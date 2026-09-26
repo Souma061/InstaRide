@@ -128,8 +128,10 @@ int main()
                 const auto &c = results[i];
                 if (i > 0)
                     std::cout << ",";
-                std::cout << "{\"id\":\"" << c.id << "\",\"lat\":" << c.lat
-                          << ",\"lng\":" << c.lng << ",\"distance\":" << std::setprecision(1) << c.distance << "}";
+                std::cout << "{\"id\":\"" << c.id
+                          << "\",\"lat\":" << std::defaultfloat << std::setprecision(12) << c.lat
+                          << ",\"lng\":" << c.lng
+                          << ",\"distance\":" << std::fixed << std::setprecision(1) << c.distance << "}";
             }
             std::cout << "]}\n"
                       << std::flush;

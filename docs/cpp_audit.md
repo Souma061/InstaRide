@@ -5,7 +5,12 @@ Audit covers all 18 files in cpp-engine/: core data structures (Quadtree.hpp, He
 
 ## ⚠️ Re-audit Status (2026-09-26)
 
-All **14 findings below remain open** — nothing in `cpp-engine/` has been changed.
+All **14 findings below are still open** — nothing in `cpp-engine/` has been changed.
+
+**Two exceptions, both added 2026-09-26:**
+
+- **#6 was not theoretical — it was live.** The original claim ("this doesn't currently cause a bug because those commands don't output floats") was wrong: the KNN response itself emits `lat`/`lng` after setting precision, so candidate #1 came back at 2 decimals and candidates #2+ at 1 decimal. `tests/test_cpp_engine_e2e.ts` measured `maxErr = 0.030 deg` (~3.3 km). **Fixed**: each float field now sets its own formatting.
+- **#15 (new)**: `Quadtree::update()` permanently dropped a driver on an out-of-bounds telemetry tick. Found by the same e2e suite and **fixed**.
 
 Three statements in this document describe TypeScript-side mitigations that had stopped being true: commit `b37eb89` reverted `SAFE_ID_REGEX` (§5), the TS `tryCollapse()` counterpart to §4, and the parse-error queue guard referenced in §5. All three were **restored** and are now locked by `tests/test_audit_fixes.ts` §8–§9, so a future revert fails the suite.
 
@@ -74,7 +79,7 @@ cpp
 
 std::cout << std::fixed << std::setprecision(2) << durationMicroseconds  // sets precision to 2
           << ... << std::setprecision(1) << c.distance << ...            // changes to 1
-std::fixed and setprecision are sticky on std::cout. After the first KNN query, all subsequent floating-point output (including INSERT/REMOVE responses echoing id strings, INIT responses) uses std::fixed with whatever precision was last set. This doesn't currently cause a bug because those commands don't output floats, but if any future command outputs coordinates they'll be truncated.
+std::fixed and setprecision are sticky on std::cout. After the first KNN query, all subsequent floating-point output (including INSERT/REMOVE responses echoing id strings, INIT responses) uses std::fixed with whatever precision was last set. This was assessed as harmless because INSERT/REMOVE/INIT echo no floats. That assessment was wrong: the KNN response emits `lat`/`lng` *after* `setprecision(2)` and, for every candidate after the first, after `setprecision(1)` — so coordinates were truncated to 2 then 1 decimal inside a single response. `tests/test_cpp_engine_e2e.ts` E1 measured `maxErr=0.030 deg` (~3.3 km of positional error). Fixed 2026-09-26 by setting the format explicitly per field (`std::defaultfloat` + precision 12 for coordinates).
 
 🟡 Medium-Severity Issues
 7. HexGrid.hpp — metersPerLngDeg Becomes Incorrect at Extreme Latitudes
@@ -164,6 +169,17 @@ HexGrid.hpp#L103
 
 s_round = -q_round - r_round; — result is computed but never used. Harmless but triggers compiler warnings.
 
+Newly Found & Fixed (2026-09-26)
+15. Quadtree.hpp - update() Permanently Drops a Driver on an Out-of-Bounds Telemetry Tick
+File:
+Quadtree.hpp (update(), slow path)
+
+The Bug: update() took the slow path whenever the new coordinate left the current leaf, and that path was `remove(id)` followed by `insert(id, ...)`. `insert()` rejects anything outside the root bounds and returns false — so one GPS tick that overshoots the region (the simulator produces these every time a driver bounces off `maxLat`) deleted the driver, and every later in-bounds tick failed because `driverIndex` no longer held the id.
+
+Symptom: the TS index still reported the driver (`updateLocation` rejects out-of-region coordinates) while the C++ mirror silently lost it. `tests/test_cpp_engine_e2e.ts` E4 saw 4 of 80 drivers permanently missing after 12 seconds of normal telemetry.
+
+Fix: bounds-check the new coordinate *before* mutating. An out-of-bounds update now returns false and leaves the driver at its last good position, matching the TS behaviour.
+
 Summary Matrix
 #	Severity	File	Issue	Fixable?
 1	🔴 High	engine_bridge.cpp	UPDATE/BATCH_UPDATE produce no response — fragile IPC contract	Yes
@@ -171,7 +187,7 @@ Summary Matrix
 3	🔴 High	HexGrid.hpp	O(n) erase in bucket vector on remove	Yes (swap-and-pop)
 4	🔴 High	Quadtree.hpp	Nodes never collapse/reclaim memory	Yes (add tryCollapse)
 5	🔴 High	engine_bridge.cpp	Unescaped ID in JSON output → parse error	Yes (escape " and \)
-6	🟡 Med	engine_bridge.cpp	setprecision is sticky across commands	Yes (reset after KNN)
+6	🟡 Med	engine_bridge.cpp	setprecision is sticky across commands	**FIXED 2026-09-26** (per-field format)
 7	🟡 Med	HexGrid.hpp	metersPerLngDeg fixed at construction	By design
 8	🟡 Med	*_c_api.cpp	KNN writes unbounded to caller buffer	Yes (add maxOut param)
 9	🟡 Med	Quadtree.hpp	Empty string ID accepted	Yes (add guard)
@@ -180,6 +196,7 @@ Summary Matrix
 12	🟢 Low	Quadtree.hpp	Typo EART_RADIUS_METERS	Yes
 13	🟢 Low	*_c_api.cpp	Duplicate struct names	Yes (shared header)
 14	🟢 Low	HexGrid.hpp	Unused s_round variable	Yes
+15	🟡 Fixed	Quadtree.hpp	update() drops driver on out-of-bounds tick	Done 2026-09-26
 What's Actually Solid ✅
 NaN/Inf guards in contains() — properly reject poisoned coordinates
 maxDepth cap — prevents infinite recursion under singularity attack

@@ -242,6 +242,11 @@ public:
             return true;
         }
 
+        if (!contains(root->bounds, lat, lng))
+        {
+            return false;
+        }
+
         // Slow path: crossed leaf boundary
         remove(id);
         return insert(id, lat, lng);

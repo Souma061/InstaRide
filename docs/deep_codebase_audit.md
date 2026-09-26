@@ -30,11 +30,13 @@ xychart-beta
 | ✅ Fixed, **not** covered by a test | H-5, H-6, M-4, M-8, L-1, L-3, L-5 |
 | ⚠️ Partially mitigated | C-3 — Redis is now acquired *before* in-memory mutation (`driver_registry.ts:161-176`), but there is still no startup reconciliation of the QuadTree from Redis |
 | ❌ Still open | C-4 (see correction), C-5, H-2, H-3, H-9, M-2, M-3, M-5, M-6, M-7, L-2, L-4, plus all three Architecture concerns |
-| ❌ Still open (C++ side) | all 14 items in [cpp_audit.md](./cpp_audit.md) |
+| ❌ Still open (C++ side) | 12 of 14 items in [cpp_audit.md](./cpp_audit.md) — #6 and the new #15 are fixed |
 
 **Correction to C-4:** the ".env … committed to git" claim was **wrong**. `.env` is listed in `.gitignore` and `git ls-files` returns only `.env.example` — `.env` has never been tracked in any commit. The real residual issue is narrower: your local `.env` ships an empty `REDIS_PASSWORD=`. Treat the rest of C-4 as invalid.
 
 **Newly found, not in the original list:** `CppSpatialBridge.stop()` could crash the host Node process via an unhandled `EPIPE` stream error. Fixed during the restore.
+
+**Newly found 2026-09-26 — FR10 was only enforced on the TypeScript index.** `DriverRegistry` is the single funnel for every index mutation, but it was handed only the TS `QuadTree`; the C++ mirror was fed `insert` + `batchUpdate` from `server.ts` and **never told about `remove`**. So a driver locked, marked busy, or evicted stayed discoverable through `cppBridge.kNearestNeighbors` — the exact path `server.ts` uses to answer matching — letting offers go to unavailable drivers. Fixed by routing all registry mutations through `idxInsert`/`idxUpdate`/`idxRemove` and attaching the bridge as a mirror (`driverRegistry.setMirror(cppBridge)`). Covered by `tests/test_cpp_engine_e2e.ts` E3.
 
 ---
 

@@ -61,6 +61,7 @@ async function main() {
   console.log("\n[E2] Out-of-bounds telemetry -> does the driver survive?");
   const tsTree = new QuadTree(BOUNDS, 8, 7);
   const registry = new DriverRegistry(tsTree);
+  registry.setMirror(bridge);
   registry.registerDriver("e2_d", 13.05, 77.7, "available");
   await bridge.insert("e2_d", 13.05, 77.7);
 
@@ -104,6 +105,7 @@ async function main() {
     process.exit(1);
   }
   await mirror.initRegion(bounds, 8, 7);
+  reg2.setMirror(mirror);
 
   sim.start(80, 100);
   for (const d of sim.getAllVirtualDrivers()) await mirror.insert(d.id, d.lat, d.lng);

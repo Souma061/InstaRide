@@ -141,6 +141,7 @@ simulator.setMatchingService(matchingService);
 
 // 3b. Initialize Native C++ Spatial Bridge
 const cppBridge = new CppSpatialBridge();
+driverRegistry.setMirror(cppBridge);
 let activeEngine: "ts" | "cpp" = "ts";
 
 cppBridge.start().then((ok) => {
