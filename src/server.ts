@@ -111,6 +111,14 @@ const matchingService = new MatchingService(
 
 // Broadcast all state machine lifecycle transitions (en_route, arrived, in_progress, completed) in real time
 stateMachine.onTransition = (event, trip) => {
+  if (tripStore) {
+    tripStore.saveTrip(trip).catch((err) => {
+      console.error(
+        `[Server] Error syncing trip ${trip.id} to Redis on transition:`,
+        err,
+      );
+    });
+  }
   wsManager.broadcastToObservers({
     type: "trip_event",
     tripId: trip.id,
@@ -263,7 +271,7 @@ fastify.post("/simulator/reset", async (req, reply) => {
       .send({ error: "driverCount must be an integer between 0 and 10000" });
   }
 
-  matchingService.reset("Operating region was reset");
+  await matchingService.reset("Operating region was reset");
 
   activeCityName = newCityName;
   activeBounds = { ...newBounds };

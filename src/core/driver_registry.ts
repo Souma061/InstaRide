@@ -157,22 +157,22 @@ export class DriverRegistry {
     if (!driver || driver.status !== "available") {
       return false;
     }
+    const now = Date.now();
     if (this.redisLock) {
       const acquired = await this.redisLock.acquireLock(driverId, requestId, ttlMs);
       if (!acquired) {
         return false;
       }
     } else {
-      const now = Date.now();
       this.cleanExpiredLockIfAny(driver, now);
       if (driver.status !== "available" || driver.lockToken) {
         return false;
       }
-      driver.lockToken = {
-        requestId,
-        expiresAt: now + ttlMs,
-      };
     }
+    driver.lockToken = {
+      requestId,
+      expiresAt: now + ttlMs,
+    };
     this.spatialIndex.remove(driverId);
     return true;
   }
@@ -185,17 +185,19 @@ export class DriverRegistry {
     if (!driver) {
       return false;
     }
+    if (driver.lockToken && driver.lockToken.requestId !== requestId) {
+      return false;
+    }
     if (this.redisLock) {
       const released = await this.redisLock.releaseLock(driverId, requestId);
       if (!released) {
-        return false;
+        const holder = await this.redisLock.getLockHolder(driverId);
+        if (holder && holder !== requestId) {
+          return false;
+        }
       }
-    } else {
-      if (!driver.lockToken || driver.lockToken.requestId !== requestId) {
-        return false;
-      }
-      delete driver.lockToken;
     }
+    delete driver.lockToken;
     // return driver to spatial search tree if still available
     if (driver.status === "available") {
       this.spatialIndex.insert(driverId, driver.lat, driver.lng);
@@ -226,8 +228,8 @@ export class DriverRegistry {
         await this.releaseLock(driverId, requestId);
         return false;
       }
-      delete driver.lockToken;
     }
+    delete driver.lockToken;
     driver.status = "busy";
     return true;
   }

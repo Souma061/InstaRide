@@ -131,15 +131,13 @@ export class RedisTripStore {
           const trip = JSON.parse(raw) as Trip;
           const isTerminal =
             trip.status === "completed" || trip.status === "cancelled";
-          const isAbandonedMatching =
-            (trip.status === "requested" || trip.status === "matching") &&
-            now - trip.createdAt > maxStaleMatchingAgeMs;
+          const isStale = now - trip.createdAt > maxStaleMatchingAgeMs;
 
-          if (isTerminal || isAbandonedMatching) {
-            if (isAbandonedMatching) {
+          if (isTerminal || isStale) {
+            if (!isTerminal) {
               trip.status = "cancelled";
               trip.cancellationReason =
-                "Abandoned due to server crash or matching timeout";
+                "Abandoned due to server restart or timeout";
               trip.cancelledAt = now;
               await redis.set(
                 `${this.tripPrefix}${tripId}`,
@@ -153,6 +151,36 @@ export class RedisTripStore {
         }
       }
     }
+
+    for (const tripId of activeTripIds) {
+      const raw = await redis.get(`${this.tripPrefix}${tripId}`);
+      if (!raw) {
+        await redis.srem(this.activeTripSetKey, tripId);
+        cleaned++;
+      } else {
+        const trip = JSON.parse(raw) as Trip;
+        const isTerminal =
+          trip.status === "completed" || trip.status === "cancelled";
+        const isStale = now - trip.createdAt > maxStaleMatchingAgeMs;
+
+        if (isTerminal || isStale) {
+          if (!isTerminal) {
+            trip.status = "cancelled";
+            trip.cancellationReason =
+              "Abandoned due to server restart or timeout";
+            trip.cancelledAt = now;
+            await redis.set(
+              `${this.tripPrefix}${tripId}`,
+              JSON.stringify(trip),
+            );
+          }
+          await redis.srem(this.activeTripSetKey, tripId);
+          await redis.del(`${this.riderActivePrefix}${trip.riderId}`);
+          cleaned++;
+        }
+      }
+    }
+
     return cleaned;
   }
   /**

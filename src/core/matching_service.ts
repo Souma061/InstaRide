@@ -256,7 +256,9 @@ export class MatchingService {
     return { success: true };
   }
   /** Cancels in-flight work before replacing the spatial region. */
-  public reset(reason: string = "Operating region was reset"): void {
+  public async reset(
+    reason: string = "Operating region was reset",
+  ): Promise<void> {
     const activeTrips = this.stateMachine.getActiveTrips();
     for (const trip of activeTrips) {
       this.abortedRequests.add(trip.requestId);
@@ -265,7 +267,7 @@ export class MatchingService {
     for (const [requestId, offer] of this.activeOffers) {
       clearTimeout(offer.timer);
       this.activeOffers.delete(requestId);
-      this.driverRegistry.releaseLock(offer.driverId, requestId);
+      await this.driverRegistry.releaseLock(offer.driverId, requestId);
       this.events.onOfferRevoked?.(offer.driverId, requestId, reason);
       offer.resolve("cancelled");
     }
@@ -274,7 +276,10 @@ export class MatchingService {
       const assignedDriverId = trip.driverId;
       const result = this.stateMachine.cancelTrip(trip.id, "system", reason);
       if (result.success && assignedDriverId) {
-        this.driverRegistry.completeTrip(assignedDriverId);
+        await this.driverRegistry.completeTrip(assignedDriverId);
+      }
+      if (this.tripStore) {
+        await this.tripStore.saveTrip(trip);
       }
     }
   }
