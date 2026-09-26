@@ -140,6 +140,17 @@ export class TripStateMachine {
       cancelledBy: null,
     };
 
+    // Prevent unbounded memory growth under continuous load: evict oldest terminal trips if exceeding capacity
+    if (this.trips.size >= 10000) {
+      for (const [id, t] of this.trips.entries()) {
+        if (t.status === "completed" || t.status === "cancelled") {
+          this.trips.delete(id);
+          this.requestToTrip.delete(t.requestId);
+          break;
+        }
+      }
+    }
+
     this.trips.set(trip.id, trip);
     this.requestToTrip.set(params.requestId, trip.id);
     this.activeRiderTrips.set(params.riderId, trip.id);
