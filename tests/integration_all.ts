@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 /**
  * Aggregate integration runner: executes every test suite in this folder
@@ -36,7 +36,9 @@ const SUITES: Suite[] = [
   { file: "test_cpp_bridge.ts", what: "C++ bridge spawn/protocol", tier: "core" },
   { file: "test_cpp_engine_e2e.ts", what: "engine_bridge.exe via koffi", tier: "core" },
   { file: "test_full_integration_stress.ts", what: "C++ DLLs + redis + concurrency", tier: "stress" },
+  { file: "e2e_ride_matching_api.ts", what: "HTTP+WS ride lifecycle contract", tier: "core" },
   { file: "e2e_server_cpp_engine.ts", what: "full server over HTTP with C++ engine", tier: "stress" },
+  { file: "stress_ride_matching.ts", what: "concurrent ride storm over HTTP", tier: "stress" },
   { file: "benchmark_3M_ts.ts", what: "3M-point quadtree stress", tier: "stress" },
 ];
 
@@ -55,6 +57,20 @@ if (selected.length === 0) {
   process.exit(2);
 }
 
+function killTree(child: ReturnType<typeof spawn>) {
+  // shell:true spawns node as a grandchild; a bare kill() leaves test servers
+  // listening on their port and makes the next suite fail with EADDRINUSE.
+  try {
+    if (process.platform === "win32" && child.pid) {
+      spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
+    } else {
+      child.kill();
+    }
+  } catch {
+    /* already dead */
+  }
+}
+
 function run(suite: Suite): Promise<{ ms: number; code: number; out: string; timedOut: boolean }> {
   return new Promise((resolve) => {
     const child = spawn(`npx tsx "tests\\${suite.file}"`, {
@@ -67,7 +83,7 @@ function run(suite: Suite): Promise<{ ms: number; code: number; out: string; tim
     const started = Date.now();
     const kill = setTimeout(() => {
       timedOut = true;
-      child.kill();
+      killTree(child);
     }, TIMEOUT_MS);
     child.stdout.on("data", (b) => (out += b));
     child.stderr.on("data", (b) => (out += b));

@@ -8,6 +8,12 @@ import {
   TripStateMachine,
 } from "./trip_state_machine.js";
 
+// Matching must never outlive the driver liveness window: evictStaleDrivers
+// (driver_registry.ts) marks a driver offline after 30s of silence, so a longer
+// walk would offer to candidates the registry is about to drop.
+const MAX_MATCH_WAIT_MS = 30_000;
+const MIN_OFFER_BUDGET_MS = 1_000;
+
 export interface OfferNotification {
   driverId: string;
   requestId: string;
@@ -263,6 +269,15 @@ export class MatchingService {
       return { success: false, error: `Trip ${tripId} not found` };
     }
 
+    // rematchTrip is idempotent for a "matching" trip, but a dispatch loop is
+    // still live: a second loop would overwrite activeOffers[requestId].
+    if (trip.status === "matching") {
+      return {
+        success: false,
+        error: `Trip ${tripId} is already being matched`,
+      };
+    }
+
     const rematchRes = this.stateMachine.rematchTrip(tripId, reason);
     if (!rematchRes.success) {
       return { success: false, error: rematchRes.error };
@@ -286,49 +301,52 @@ export class MatchingService {
 
   /**
    * The candidate offer loop:
-   * 1. Fetches top K nearest available drivers via QuadTree.
-   * 2. Sequentially acquires lock on candidate #i.
-   * 3. Awaits 15s driver response.
+   * 1. Re-reads the top K nearest available drivers from the QuadTree before
+   *    every offer, so a driver that recovers mid-loop is still eligible here.
+   * 2. Sequentially acquires lock on the next untried candidate.
+   * 3. Awaits the driver response, clipped to the remaining trip budget.
    * 4. On accept -> commits trip & matches.
-   * 5. On reject/timeout -> releases lock and immediately falls back to candidate #i+1.
+   * 5. On reject/timeout -> releases lock and immediately falls back to the next candidate.
    */
   private async dispatchOfferLoop(
     trip: Trip,
     config: { k: number; maxRadiusMeters: number; offerTimeoutMs: number },
   ): Promise<void> {
-    const candidates = this.driverRegistry.findNearbyCandidates(
-      trip.pickup.lat,
-      trip.pickup.lng,
-      config.k,
-      config.maxRadiusMeters,
-    );
-
-    if (candidates.length === 0) {
-      this.stateMachine.cancelTrip(
-        trip.id,
-        "system",
-        "No available drivers in search radius",
-      );
-      if (this.tripStore) {
-        await this.tripStore.saveTrip(trip);
-      }
-      this.events.onMatchFailed?.(
-        trip.requestId,
-        "No available drivers in search radius",
-      );
-      return;
-    }
+    const deadline = Date.now() + MAX_MATCH_WAIT_MS;
+    const tried = new Set<string>();
+    let hadCandidates = false;
     const LOCK_SAFETY_MARGIN_MS = 3000; // 3 second safety margin to account for network latency and processing time
 
     try {
-      for (let i = 0; i < candidates.length; i++) {
+      for (let i = 0; i < config.k; i++) {
         // Check if rider cancelled while loop was waiting
         if (this.abortedRequests.has(trip.requestId)) {
           return;
         }
 
-        const candidate = candidates[i];
-        const lockTtlMs = config.offerTimeoutMs + LOCK_SAFETY_MARGIN_MS;
+        const budgetMs = deadline - Date.now();
+        const minOfferBudgetMs = Math.min(
+          MIN_OFFER_BUDGET_MS,
+          config.offerTimeoutMs,
+        );
+        if (budgetMs < minOfferBudgetMs) break;
+
+        const candidates = this.driverRegistry
+          .findNearbyCandidates(
+            trip.pickup.lat,
+            trip.pickup.lng,
+            config.k,
+            config.maxRadiusMeters,
+          )
+          .filter((c) => !tried.has(c.id));
+        if (candidates.length === 0) break;
+        hadCandidates = true;
+
+        const candidate = candidates[0];
+        tried.add(candidate.id);
+
+        const offerTimeoutMs = Math.min(config.offerTimeoutMs, budgetMs);
+        const lockTtlMs = offerTimeoutMs + LOCK_SAFETY_MARGIN_MS;
 
         // Try acquiring atomic lock on candidate
         const locked = await this.driverRegistry.acquireLock(
@@ -346,7 +364,7 @@ export class MatchingService {
         const outcome = await this.awaitCandidateOffer(
           candidate,
           trip,
-          config.offerTimeoutMs,
+          offerTimeoutMs,
         );
         if (
           this.abortedRequests.has(trip.requestId) ||
@@ -406,18 +424,14 @@ export class MatchingService {
 
       // If loop finishes with no driver accepting
       if (!this.abortedRequests.has(trip.requestId)) {
-        this.stateMachine.cancelTrip(
-          trip.id,
-          "system",
-          "All candidate drivers declined or timed out",
-        );
+        const reason = hadCandidates
+          ? "All candidate drivers declined or timed out"
+          : "No available drivers in search radius";
+        this.stateMachine.cancelTrip(trip.id, "system", reason);
         if (this.tripStore) {
           await this.tripStore.saveTrip(trip);
         }
-        this.events.onMatchFailed?.(
-          trip.requestId,
-          "All candidate drivers declined or timed out",
-        );
+        this.events.onMatchFailed?.(trip.requestId, reason);
       }
     } finally {
       // Prevent unbounded memory growth under continuous load
