@@ -1,6 +1,24 @@
 version: "3.8"
 
 services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: instaride-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=instaride
+      - POSTGRES_PASSWORD=instaride
+      - POSTGRES_DB=instaride
+    volumes:
+      - instaride-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U instaride -d instaride"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   prometheus:
     image: prom/prometheus:latest
     container_name: instaride-prometheus
@@ -31,3 +49,6 @@ services:
       - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
+
+volumes:
+  instaride-pgdata:
