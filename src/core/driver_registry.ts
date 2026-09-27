@@ -195,9 +195,29 @@ export class DriverRegistry {
     }
     const now = Date.now();
     if (this.redisLock) {
-      const acquired = await this.redisLock.acquireLock(driverId, requestId, ttlMs);
+      let acquired = await this.redisLock.acquireLock(
+        driverId,
+        requestId,
+        ttlMs,
+      );
       if (!acquired) {
-        return false;
+        const holder = await this.redisLock.getLockHolder(driverId);
+        if (holder) {
+          return false; // a real lease is held against this driver
+        }
+        // No lease, yet the Lua refused: driver:state still says "busy" from a
+        // trip whose driver was dropped by a region reset (driver:state has no
+        // TTL). Memory is authoritative for a single-process matcher, so a
+        // driver we hold as available is available. Heal the stale state.
+        await this.redisLock.releaseCommittedDriver(driverId, "available");
+        acquired = await this.redisLock.acquireLock(
+          driverId,
+          requestId,
+          ttlMs,
+        );
+        if (!acquired) {
+          return false;
+        }
       }
     } else {
       this.cleanExpiredLockIfAny(driver, now);

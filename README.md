@@ -8,7 +8,7 @@
 [![TailwindCSS](https://img.shields.io/badge/Tailwind-4.x-38bdf8.svg)](https://tailwindcss.com/)
 [![Tests](https://img.shields.io/badge/Tests-Passing-emerald.svg)]()
 
-A high-performance, real-time ride-matching platform and interactive spatial dashboard that matches riders to the nearest available drivers in sub-millisecond speeds. Features a **dual-engine architecture** with both an in-memory **TypeScript PR-QuadTree** and a **Native C++ (`-O3`) spatial accelerator** connected via a zero-dependency Stdio IPC bridge, **atomic CAS lock leases**, and a **deterministic trip finite state machine**—completely free of managed geospatial databases (no Redis Geo, no PostGIS). Tested and verified against **1,000,000 (1 Million) concurrent drivers**.
+A high-performance, real-time ride-matching platform and interactive spatial dashboard that matches riders to the nearest available drivers in sub-millisecond speeds. Features a **dual-engine architecture** with both an in-memory **TypeScript PR-QuadTree** and a **Native C++ (`-O3`) spatial accelerator** connected via a zero-dependency Stdio IPC bridge, **atomic CAS lock leases**, and a **deterministic trip finite state machine**—completely free of managed geospatial databases (no Redis Geo, no PostGIS). Tested and verified against **1,000,000 (1 Million) concurrent drivers**, a **3,000,000-point** spatial stress harness, and a 17-suite integration gate (`pnpm test:all:stress`).
 
 ---
 
@@ -220,6 +220,7 @@ graph TD
 - **Socket Reconnection Hygiene**: Reconnecting drivers retain active trips and lock statuses. Stale socket teardowns cannot offline replacement connections.
 - **Bounded Geometry & Timing Sanitization**: Coordinates must strictly satisfy latitude $[-90, 90]$ and longitude $[-180, 180]$. Timeouts are strictly clamped to $[1000\text{ms}, 60000\text{ms}]$.
 - **Simulator Reset Hygiene**: Resetting the active region (`POST /simulator/reset`) safely cleans in-flight offers and state machine assignments, preventing ghost rides across city switches.
+- **Stale Lock-State Healing**: `driver:state:{id}` in Redis carries no TTL, so a committed trip dropped by a region reset could leave a driver flagged `busy` forever — present in memory as `available` yet silently unmatchable. `acquireLock` reconciles: if memory holds the driver as available and Redis holds no live lease, the stale flag is cleared and the claim retried.
 
 ---
 
@@ -269,41 +270,79 @@ Connect to the multiplexed gateway at `ws://localhost:3000/ws?role={role}&id={id
 
 ## Testing & Verification
 
-The test suite covers algorithmic correctness, concurrency safety, edge-case recovery, and API security.
+The suite covers algorithmic correctness, concurrency safety, edge-case recovery, API security, and full-stack HTTP/WebSocket behaviour. **A local Redis on `127.0.0.1:6379` is required** for the aggregate runners.
+
+### Aggregate runners
 
 ```bash
-# Run all audit fixes & security invariants (29 tests)
-pnpm test:audit
+pnpm build:cpp                                 # once — suite 12 needs engine_bridge.exe
+pnpm test:all                                   # 13 core suites  (~40s)
+pnpm test:all:stress                            # 17 core + stress (~105s)
+pnpm exec tsx tests/integration_all.ts --only matching   # single suite, by filename substring
+```
 
-# Run 2-Rider Concurrency Race & 2,000-request stress test (0% duplicate dispatch)
-pnpm test:concurrency
+A suite passes when it exits `0` **and** its output carries no failure marker — several suites assert through console output rather than `process.exit`, so exit code alone is not trustworthy.
 
-# Run integration edge-case coverage (Reset lifecycle, socket reconnect, accept/cancel race)
-pnpm test:integration
+| # | Suite | Tier | What it proves |
+| :-- | :---- | :-- | :--------------- |
+| 1 | `test_quadtree.ts` | core | PR-QuadTree geometry, rebalancing, k-NN ranking |
+| 2 | `test_driver_registry.ts` | core | Registry state, index-only-available invariant |
+| 3 | `test_trip_state_machine.ts` | core | FSM transition matrix + invariants (22 checks) |
+| 4 | `test_matching_service.ts` | core | Offer loop, deadline budget, fallback cascade, guard rails (115 checks) |
+| 5 | `test_audit_fixes.ts` | core | Regression suite for every audit finding (50 checks) |
+| 6 | `test_integration_edge_cases.ts` | core | Region reset, socket reconnect, accept/cancel race (11 checks) |
+| 7 | `test_concurrency_race.ts` | core | 2-rider race + burst — **0% duplicate dispatch** |
+| 8 | `test_redis_driver_lock.ts` | core | Redis lease: TTL expiry, steal-proofing, swarm contention |
+| 9 | `test_redis_trip_store.ts` | core | Redis trip store invariants |
+| 10 | `test_full_redis_matching_integration.ts` | core | 7 end-to-end Redis edge cases, incl. stale-state healing |
+| 11 | `test_cpp_bridge.ts` | core | C++ bridge spawn + stdio protocol |
+| 12 | `test_cpp_engine_e2e.ts` | core | `engine_bridge.exe` invoked through koffi |
+| 13 | `e2e_ride_matching_api.ts` | core | Real server over HTTP + WS: validation, full ride lifecycle, deadman timeout, idempotency, cancel, driver contention (53 checks) |
+| 14 | `test_full_integration_stress.ts` | stress | C++ DLLs + Redis + concurrency burst |
+| 15 | `e2e_server_cpp_engine.ts` | stress | Full server over HTTP with the C++ engine selected |
+| 16 | `stress_ride_matching.ts` | stress | Concurrent ride storm through the HTTP API (26 checks) |
+| 17 | `benchmark_3M_ts.ts` | stress | 3,000,000-point quadtree build + query stress |
 
-# Run trip state machine transition matrix tests
-pnpm test:state-machine
+### HTTP/WebSocket end-to-end
 
-# Run matching service offer loop & timeout cascade tests
-pnpm test:matching
+Suites 13, 15 and 16 boot a **real server process** through `tests/helpers/e2e_harness.ts`, which refuses to start if the port already answers (a leftover server would otherwise satisfy `/health` while the fresh one dies on `EADDRINUSE`) and reaps the whole process tree on teardown. They use ports **3997–3999**.
 
-# Run PR-QuadTree spatial partitioning & k-NN tests
-pnpm test:quadtree
+`tests/stress_ride_matching.ts` runs two phases: a contention-free *utilization* pass (one ride per driver → the whole fleet must match) followed by an oversubscribed *storm*, asserting no driver ever holds two trips at once, no lock leaks, and full repopulation of the spatial index.
 
-# Run C++ Native Stdio IPC Bridge integration test
+```bash
+pnpm exec tsx tests/stress_ride_matching.ts
+
+# scale it up / down (defaults: 60 drivers, 300 rides, 2 waves)
+STRESS_DRIVERS=120 STRESS_RIDES=600 STRESS_WAVES=3 pnpm exec tsx tests/stress_ride_matching.ts
+
+# PowerShell
+$env:STRESS_DRIVERS=120; $env:STRESS_RIDES=600; pnpm exec tsx tests/stress_ride_matching.ts
+```
+
+### Individual suites
+
+```bash
+pnpm test:audit          # audit fixes & security invariants
+pnpm test:concurrency    # 2-rider race + 2,000-request stress
+pnpm test:integration    # integration edge cases
+pnpm test:state-machine  # trip state machine
+pnpm test:matching       # matching service offer loop
+pnpm test:quadtree       # PR-QuadTree + k-NN
 pnpm exec tsx tests/test_cpp_bridge.ts
+```
 
-# --- 1,000,000 (1M) DRIVER BENCHMARK SUITES ---
-# Compile and run Native C++ 1M Benchmark:
-cd cpp-engine
-g++ -O3 -std=c++14 benchmark_1M.cpp -lpsapi -o benchmark_1M.exe
-./benchmark_1M.exe
+### Benchmarks
 
-# Run TypeScript 1M Benchmark:
-cd ..
-pnpm exec tsx tests/benchmark_1M_ts.ts
+```bash
+# 1,000,000-driver benchmark, both engines
+pnpm benchmark:1M:cpp
+pnpm benchmark:1M:ts
 
-# Verify TypeScript compilation (0 errors)
+# 3,000,000-point spatial stress
+pnpm stress:3m:cpp
+pnpm stress:3m:ts
+
+# Type check (0 errors)
 pnpm build
 ```
 

@@ -123,7 +123,13 @@ async function main() {
     results.push({ s, ms: r.ms, ok: v.ok, why: v.why, out: r.out });
     console.log(`${v.ok ? "PASS" : "FAIL"}  ${sec.padStart(6)}s   ${v.why}   (${s.what})`);
     if (!v.ok) {
-      console.log("\n  ---- output tail ----------------------------------------------------");
+      const fails = r.out
+        .split(/\r?\n/)
+        .filter((l) => l.includes("FAIL"))
+        .slice(0, 20);
+      console.log("\n  ---- failed checks --------------------------------------------------");
+      for (const l of fails) console.log(`  | ${l.trim()}`);
+      console.log("  ---- output tail ----------------------------------------------------");
       console.log(tail(r.out).replace(/^/gm, "  | "));
       console.log("  ---------------------------------------------------------------------\n");
     }

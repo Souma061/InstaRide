@@ -545,6 +545,16 @@ async function main() {
         "one rider must lose the race",
       );
 
+      // The loser's match_failed can reach the observer before the winner's
+      // offer_dispatched (the offer goes out after a Redis round-trip), so
+      // wait for it explicitly. Timing out here means nobody was ever offered
+      // the driver — a real dispatch bug, not a test race.
+      await obs.waitFor(
+        (m) => m.type === "offer_dispatched" && m.driverId === "e2e_solo",
+        8_000,
+        "winner's offer for the contended driver",
+      );
+
       const offers = obs
         .ofType("offer_dispatched")
         .slice(obsBefore)

@@ -281,6 +281,40 @@ async function runFullIntegrationTest() {
     "  [+] PASSED: Completed trip, released rider, and returned driver to available.\n",
   );
 
+  // --------------------------------------------------------------------------
+  // EDGE CASE 7: Stale Redis "busy" left behind by a region reset
+  // --------------------------------------------------------------------------
+  // driver:state has no TTL. A trip committed in the old region, followed by
+  // /simulator/reset, leaves Redis saying "busy" while memory re-seeds the
+  // driver as available — which made the driver silently unmatchable forever.
+  console.log(
+    "[Test 7] Region reset must not leave a driver permanently unmatchable...",
+  );
+  const D_STALE = "driver_stale_reset";
+  await redis.hset(`driver:state:${D_STALE}`, {
+    status: "busy",
+    currentTripRequestId: "req_ghost_of_previous_region",
+  });
+
+  driverRegistry.reset(new QuadTree(bounds, 8, 10));
+  driverRegistry.registerDriver(D_STALE, 12.99, 77.61, "available");
+
+  const healed = await driverRegistry.acquireLock(
+    D_STALE,
+    "req_after_reset",
+    5000,
+  );
+  assert(healed, "acquireLock must succeed for a driver memory holds as available");
+  const staleState = await redis.hgetall(`driver:state:${D_STALE}`);
+  assert(
+    staleState.status === "available",
+    `stale Redis state must be healed, got ${staleState.status}`,
+  );
+  await driverRegistry.releaseLock(D_STALE, "req_after_reset");
+  console.log(
+    "  [+] PASSED: Stale Redis state healed; driver matchable again after reset.\n",
+  );
+
   console.log(
     "======================================================================",
   );
