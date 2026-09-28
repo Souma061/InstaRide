@@ -29,9 +29,53 @@ pnpm build:cpp                # required: two core suites drive engine_bridge.ex
 `test_cpp_engine_e2e.ts` are in the core tier and both invoke the compiled
 bridge through koffi. The `.exe` is gitignored, so a fresh clone has none.
 
+Redis is the one thing the repo cannot start for you. Either point `.env` at an
+existing instance, or bring up the bundled container:
+
+```bash
+pnpm monitoring:up             # redis + prometheus + grafana
+pnpm monitoring:down
+```
+
 > Use pnpm 9.x. The repo pins `packageManager`, so corepack handles this
 > automatically. A newer global pnpm (10/11) rejects this repo's
 > `pnpm-workspace.yaml`.
+
+## Security model
+
+Read this before changing anything in `src/gateway/` or `src/server.ts`.
+
+**There is no authentication, by design.** A client connects as
+`ws://host:3000/ws?role=driver&id=driver-42` and the server believes it. Role
+and identity are read straight from the query string, so *any* client can
+impersonate *any* driver or rider. The ownership checks you will see
+(`trip.riderId !== clientId`, `activeOffer.driverId !== clientId`) protect
+against a well-behaved client acting on the wrong identity — they are not an
+authn boundary, because the attacker simply claims the victim's id.
+
+What *is* enforced, in `preValidation` before the WebSocket upgrade and on all
+eight mutating HTTP routes:
+
+- **Bind address.** `HOST` defaults to `127.0.0.1`. Setting it to anything
+  non-loopback (including `0.0.0.0`, the wildcard bind) makes the server refuse
+  to start unless `CONTROL_API_TOKEN` is set. Note `0.0.0.0` is a wildcard, not
+  a loopback address, and must never be treated as local.
+- **Bearer token.** Non-loopback binds require
+  `Authorization: Bearer $CONTROL_API_TOKEN`.
+- **WebSocket Origin.** Browsers always send `Origin` on a WS handshake; native
+  clients send none and are allowed through. A cross-site `Origin` is rejected
+  with a 403 *before* the socket is upgraded, because WebSocket is the one
+  cross-site vector with no CORS preflight. Loopback origins are allowed so the
+  Vite dev server can proxy `/ws`.
+
+`tests/test_control_access.ts` locks all of this down. If you touch the access
+gate, that suite must stay green.
+
+This is a demonstration system with no rider records, no payments, and no PII.
+Adding JWT sessions, RBAC, rate limiting, or a full identity model is
+deliberately out of scope — if this ever carries real trips, that is the work
+that has to happen first, and it should be a considered design, not a
+half-built auth layer.
 
 ## Verifying your change
 

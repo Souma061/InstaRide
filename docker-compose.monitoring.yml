@@ -1,26 +1,31 @@
-version: "3.8"
+# Local development / monitoring stack.
+#
+# Images are pinned by digest rather than a floating tag, so `compose up` cannot
+# silently pull a different upstream build. The digest is the one this project
+# was last verified against; refresh it deliberately with:
+#   docker pull <image> && docker image inspect <image> --format "{{json .RepoDigests}}"
+#
+# Redis is included because the backend and the whole test suite need it. It
+# used to be a manually started container that nothing in the repo declared.
+#
+# This stack is for local development. It publishes ports to the host and ships
+# dev-only credentials, so do not expose it on a shared network.
 
 services:
-  postgres:
-    image: postgres:17-alpine
-    container_name: instaride-postgres
+  redis:
+    image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+    container_name: instaride-redis
     restart: unless-stopped
     ports:
-      - "5432:5432"
-    environment:
-      - POSTGRES_USER=instaride
-      - POSTGRES_PASSWORD=instaride
-      - POSTGRES_DB=instaride
-    volumes:
-      - instaride-pgdata:/var/lib/postgresql/data
+      - "6379:6379"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U instaride -d instaride"]
+      test: ["CMD-SHELL", "redis-cli ping"]
       interval: 5s
       timeout: 3s
       retries: 10
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0
     container_name: instaride-prometheus
     restart: unless-stopped
     ports:
@@ -34,21 +39,23 @@ services:
       - "--storage.tsdb.retention.time=7d"
 
   grafana:
-    image: grafana/grafana:latest-slim
+    image: grafana/grafana@sha256:979e791fc495d5ea5bf0cb39d4a36f7ceab52aa237ea76e609ea43d6a3164c88
     container_name: instaride-grafana
     restart: unless-stopped
     ports:
       - "3001:3000"
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/instaride-overview.json
+      # Dev-only defaults. Override via the environment before exposing this.
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/instaride-overview.json
     volumes:
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
 
-volumes:
-  instaride-pgdata:
+# Removed: a postgres service with no client. Nothing in src/ imports a pg
+# driver, prometheus only scrapes the backend /metrics endpoint, and no Grafana
+# dashboard referenced it — it published 5432 to the host for no purpose.
