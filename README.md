@@ -6,7 +6,8 @@
 [![React](https://img.shields.io/badge/React-19.x-61dafb.svg)](https://react.dev/)
 [![Vite](https://img.shields.io/badge/Vite-8.x-646cff.svg)](https://vitejs.dev/)
 [![TailwindCSS](https://img.shields.io/badge/Tailwind-4.x-38bdf8.svg)](https://tailwindcss.com/)
-[![Tests](https://img.shields.io/badge/Tests-Passing-emerald.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-Passing-emerald.svg)](https://github.com/Souma061/InstaRide/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A high-performance, real-time ride-matching platform and interactive spatial dashboard that matches riders to the nearest available drivers in sub-millisecond speeds. Features a **dual-engine architecture** with both an in-memory **TypeScript PR-QuadTree** and a **Native C++ (`-O3`) spatial accelerator** connected via a zero-dependency Stdio IPC bridge, **atomic CAS lock leases**, and a **deterministic trip finite state machine**—completely free of managed geospatial databases (no Redis Geo, no PostGIS). Tested and verified against **1,000,000 (1 Million) concurrent drivers**, a **3,000,000-point** spatial stress harness, and a 17-suite integration gate (`pnpm test:all:stress`).
 
@@ -275,11 +276,13 @@ The suite covers algorithmic correctness, concurrency safety, edge-case recovery
 ### Aggregate runners
 
 ```bash
-pnpm build:cpp                                 # once — suite 12 needs engine_bridge.exe
-pnpm test:all                                   # 13 core suites  (~40s)
+pnpm build:cpp                                 # once - suites 11 & 12 need engine_bridge.exe
+pnpm test                                       # 13 core suites (~40s) - same gate CI runs
+pnpm typecheck                                  # tsc --noEmit, must be 0 errors
 pnpm test:all:stress                            # 17 core + stress (~105s)
 pnpm exec tsx tests/integration_all.ts --only matching   # single suite, by filename substring
 ```
+
 
 A suite passes when it exits `0` **and** its output carries no failure marker — several suites assert through console output rather than `process.exit`, so exit code alone is not trustworthy.
 
@@ -394,4 +397,6 @@ Open **`http://localhost:3000`** in your browser:
 
 ## License
 
-MIT License. Designed and engineered for high-scale spatial systems demonstration.
+[MIT License](LICENSE). Designed and engineered for high-scale spatial systems demonstration.
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).

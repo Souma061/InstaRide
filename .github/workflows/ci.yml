@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    # The aggregate runner (tests/integration_all.ts) hardcodes a Windows path
+    # separator and the e2e harness reaps process trees with taskkill /T, so
+    # the suite is only verified on Windows. Do not switch this runner without
+    # porting those two call sites first.
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: "6379"
+      FORCE_COLOR: "0"
+      CI: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm typecheck
+
+      # Two core suites drive engine_bridge.exe through koffi, and the binary is
+      # gitignored — a fresh checkout has none until this runs.
+      - name: Verify C++ toolchain
+        run: |
+          if (-not (Get-Command g++ -ErrorAction SilentlyContinue)) {
+            if (Test-Path "C:\mingw64\bin\g++.exe") { $env:Path += ";C:\mingw64\bin" }
+            else { choco install mingw -y --no-progress }
+          }
+          g++ --version
+
+      - name: Build native engine
+        run: pnpm build:cpp
+
+      - name: Test (13 core suites)
+        run: pnpm test
