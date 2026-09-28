@@ -36,15 +36,18 @@ export const BLR_BOUNDS: GeoBounds = {
 let activeCityName = "Bengaluru";
 let activeBounds: GeoBounds = { ...BLR_BOUNDS };
 
-const HOST = process.env.HOST || "0.0.0.0";
+const HOST = process.env.HOST || "127.0.0.1";
 const CONTROL_API_TOKEN = process.env.CONTROL_API_TOKEN;
-const isLoopbackHost =
-  HOST === "127.0.0.1" ||
-  HOST === "localhost" ||
-  HOST === "::1" ||
-  HOST === "0.0.0.0";
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+// 0.0.0.0 is the wildcard bind, NOT loopback: it listens on every interface.
+// Treating it as local disabled the token gate on every default install, so it
+// must stay out of this set.
+const isLoopbackHost = LOOPBACK_HOSTS.has(HOST);
 if (!isLoopbackHost && !CONTROL_API_TOKEN) {
-  throw new Error("CONTROL_API_TOKEN is required when HOST is not loopback");
+  throw new Error(
+    `CONTROL_API_TOKEN is required when HOST is not loopback (HOST=${HOST}). ` +
+      `Set it, or set HOST=127.0.0.1 for local-only use.`,
+  );
 }
 
 function hasControlAccess(
@@ -53,6 +56,27 @@ function hasControlAccess(
   return (
     isLoopbackHost || headers.authorization === `Bearer ${CONTROL_API_TOKEN}`
   );
+}
+
+/**
+ * Browsers always send Origin on a WebSocket handshake; native clients (tests,
+ * curl, the simulator) send none, and there is no browser to attack in that
+ * case. WebSocket is also the one cross-site vector with no preflight, so this
+ * is what stops an arbitrary web page from driving the control gateway on a
+ * loopback-bound instance.
+ */
+function isAllowedOrigin(origin: string | undefined): boolean {
+  if (!origin) return true;
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return false;
+  }
+  // Strip the port: the Vite dev server proxies /ws from its own port.
+  const host = parsed.host.replace(/:\d+$/, "");
+  if (LOOPBACK_HOSTS.has(host)) return true;
+  return host === HOST;
 }
 
 const fastify = Fastify({
@@ -808,21 +832,36 @@ fastify.post("/drivers/spawn", async (req, reply) => {
 });
 
 // --- WEBSOCKET GATEWAY ---
-fastify.get("/ws", { websocket: true }, (socket, req) => {
-  const query = (req.query || {}) as { role?: string; id?: string };
-  if (!hasControlAccess(req.headers)) {
-    socket.close(1008, "Unauthorized");
-    return;
-  }
-  const role: ClientRole = (query.role as ClientRole) || "observer";
-  if (role !== "rider" && role !== "driver" && role !== "observer") {
-    socket.close(1008, "Invalid role");
-    return;
-  }
-  const clientId = query.id;
+// Auth and Origin are enforced in preValidation, which @fastify/websocket runs
+// before the handler that performs the upgrade. Rejecting there means a refused
+// client never gets an open socket at all, rather than a socket that is closed
+// a few milliseconds after the handshake completes.
+fastify.get(
+  "/ws",
+  {
+    websocket: true,
+    preValidation: async (req, reply) => {
+      if (!hasControlAccess(req.headers)) {
+        return reply.code(401).send({ error: "Unauthorized" });
+      }
+      const origin = req.headers.origin;
+      if (!isAllowedOrigin(typeof origin === "string" ? origin : undefined)) {
+        return reply.code(403).send({ error: "Forbidden origin" });
+      }
+    },
+  },
+  (socket, req) => {
+    const query = (req.query || {}) as { role?: string; id?: string };
+    const role: ClientRole = (query.role as ClientRole) || "observer";
+    if (role !== "rider" && role !== "driver" && role !== "observer") {
+      socket.close(1008, "Invalid role");
+      return;
+    }
+    const clientId = query.id;
 
-  wsManager.handleConnection(socket, role, clientId);
-});
+    wsManager.handleConnection(socket, role, clientId);
+  },
+);
 
 const PORT = Number(process.env.PORT) || 3000;
 

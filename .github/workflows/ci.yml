@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    # Linux runner, not just for the Redis service container (GitHub only
+    # supports those on Linux) but because the suite is platform-neutral: the
+    # native engine is a plain executable behind a stdio pipe, and the test
+    # harness spawns detached process groups rather than shelling out to
+    # taskkill. The koffi FFI suites are stress-tier only and load Windows
+    # DLLs, so they stay out of CI.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: "6379"
+      FORCE_COLOR: "0"
+      CI: "true"
+
+    steps:
+      # Actions are pinned to commit SHAs, not floating tags: an `@v4` tag is
+      # mutable, and this workflow runs on every fork PR.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm typecheck
+
+      # Two core suites drive the engine binary through its stdio protocol, and
+      # the binary is gitignored — a fresh checkout has none until this runs.
+      # The output is named .exe for historical reasons; it is an ordinary
+      # native executable on whatever platform built it.
+      - name: Build native engine
+        run: pnpm build:cpp
+
+      - name: Test (14 core suites)
+        run: pnpm test

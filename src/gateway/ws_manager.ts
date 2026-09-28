@@ -74,7 +74,8 @@ export class WsManager {
     socket.on("close", () => {
       if (role === "rider") {
         // Do not let an older connection erase a replacement socket for the
-        // same authenticated client identity.
+        // same client identity. Note this identity is self-asserted (the `id`
+        // query param) — see the security model in CONTRIBUTING.md.
         if (this.riderSockets.get(clientId) === socket) {
           this.riderSockets.delete(clientId);
         }

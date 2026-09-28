@@ -1,0 +1,17 @@
+# Normalize line endings in the repo; check out per-platform.
+* text=auto eol=lf
+
+# Binary assets — never translate.
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+
+# Windows scripts must stay CRLF so cmd.exe runs them.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Keep lockfiles exact and diffable.
+pnpm-lock.yaml text eol=lf

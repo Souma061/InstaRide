@@ -1,4 +1,23 @@
 import { spawn, spawnSync, ChildProcess } from "node:child_process";
+// Imported rather than using the global: Node only exposes a global WebSocket
+// from v22, and this package declares support for Node >= 20.
+import WebSocket from "ws";
+
+function killTree(child: ChildProcess) {
+  // spawn() with shell:true leaves the real process as a grandchild; a bare
+  // kill() leaves it listening on its port. Windows needs taskkill /T; POSIX
+  // needs the process group, which only exists because we spawn detached.
+  try {
+    if (!child.pid) return;
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
+    } else {
+      process.kill(-child.pid, "SIGKILL");
+    }
+  } catch {
+    /* already dead */
+  }
+}
 
 async function portInUse(port: number): Promise<boolean> {
   const ac = new AbortController();
@@ -90,11 +109,21 @@ export async function startServer(port: number): Promise<Api> {
   // A leftover server from a previous run would answer /health while the fresh
   // one dies on EADDRINUSE — fail fast instead of testing the wrong process.
   if (await portInUse(port)) {
-    throw new Error(`port ${port} already in use (leftover test server?)`);
+    const hint =
+      process.platform === "win32"
+        ? `  netstat -ano | findstr :${port}\n  taskkill /pid <pid> /T /F`
+        : `  lsof -ti tcp:${port} | xargs -r kill -9`;
+    throw new Error(
+      `port ${port} is already in use — a leftover test server from an earlier ` +
+        `run. Kill it, then retry:\n` +
+        hint,
+    );
   }
 
   const child = spawn("npx", ["tsx", "src/server.ts"], {
     shell: true,
+    // Own process group on POSIX so killTree can reap the tree.
+    detached: process.platform !== "win32",
     cwd: process.cwd(),
     env: {
       ...process.env,
@@ -129,25 +158,33 @@ export async function startServer(port: number): Promise<Api> {
       };
     },
     stop: async () => {
-      // spawn() with shell:true leaves node as a grandchild; taskkill /T
-      // reaps the whole tree so the next run finds a free port.
-      try {
-        if (process.platform === "win32" && child.pid) {
-          spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
-        } else {
-          child.kill();
-        }
-      } catch {
-        /* already dead */
-      }
+      killTree(child);
       await sleep(400);
     },
   };
 
+  // Ctrl+C / a thrown error must not strand the server: a surviving node
+  // grandchild owns the port and blocks every later run.
+  let reaped = false;
+  const reap = () => {
+    if (reaped) return;
+    reaped = true;
+    killTree(child);
+  };
+  process.once("exit", reap);
+  process.once("SIGINT", () => {
+    reap();
+    process.exit(130);
+  });
+  process.once("SIGTERM", () => {
+    reap();
+    process.exit(143);
+  });
+
   const abort = setTimeout(() => {
     console.error("---- server log tail ----");
     console.error(logs.slice(-50).join(""));
-    child.kill();
+    reap();
   }, 75_000);
 
   try {
@@ -206,14 +243,25 @@ export class WsTap {
   readonly messages: any[] = [];
   private readonly waiters: Waiter[] = [];
 
-  private constructor(private readonly ws: WebSocket) {}
+  private readonly ws: WebSocket;
 
-  static connect(port: number, role: string, id?: string): Promise<WsTap> {
+  private constructor(ws: WebSocket) {
+    this.ws = ws;
+  }
+
+  static connect(
+    port: number,
+    role: string,
+    id?: string,
+    origin?: string,
+  ): Promise<WsTap> {
     const url = `ws://127.0.0.1:${port}/ws?role=${role}${
       id ? `&id=${encodeURIComponent(id)}` : ""
     }`;
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(url);
+      const ws = origin
+        ? new WebSocket(url, { headers: { Origin: origin } })
+        : new WebSocket(url);
       const tap = new WsTap(ws);
       const timer = setTimeout(() => {
         reject(new Error(`ws open timeout for ${url}`));

@@ -6,7 +6,8 @@
 [![React](https://img.shields.io/badge/React-19.x-61dafb.svg)](https://react.dev/)
 [![Vite](https://img.shields.io/badge/Vite-8.x-646cff.svg)](https://vitejs.dev/)
 [![TailwindCSS](https://img.shields.io/badge/Tailwind-4.x-38bdf8.svg)](https://tailwindcss.com/)
-[![Tests](https://img.shields.io/badge/Tests-Passing-emerald.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-Passing-emerald.svg)](https://github.com/Souma061/InstaRide/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A high-performance, real-time ride-matching platform and interactive spatial dashboard that matches riders to the nearest available drivers in sub-millisecond speeds. Features a **dual-engine architecture** with both an in-memory **TypeScript PR-QuadTree** and a **Native C++ (`-O3`) spatial accelerator** connected via a zero-dependency Stdio IPC bridge, **atomic CAS lock leases**, and a **deterministic trip finite state machine**—completely free of managed geospatial databases (no Redis Geo, no PostGIS). Tested and verified against **1,000,000 (1 Million) concurrent drivers**, a **3,000,000-point** spatial stress harness, and a 17-suite integration gate (`pnpm test:all:stress`).
 
@@ -123,7 +124,7 @@ sequenceDiagram
 InstaRide includes both an in-memory TypeScript PR-QuadTree and a compiled native **C++ PR-QuadTree** (`cpp-engine/Quadtree.hpp`):
 
 - **Zero-Dependency Stdio IPC Bridge**: Rather than relying on fragile native addon compilers (`node-gyp`), Node.js communicates with `engine_bridge.exe` via high-throughput standard I/O operating system pipes (`std::cin` / `std::cout`) with sub-millisecond round-trip times.
-- **Hardware-Precise Microsecond Timing**: The C++ engine leverages Windows' hardware `QueryPerformanceCounter` (QPC) to measure exact spatial search execution down to sub-microsecond precision.
+- **Hardware-Precise Microsecond Timing**: The C++ engine leverages Windows' hardware `QueryPerformanceCounter` (QPC) to measure exact spatial search execution down to sub-microsecond precision, falling back to `std::chrono::high_resolution_clock` on other platforms.
 - **Dynamic Frontend Engine Switcher**: The React 19 UI features a live toolbar toggle allowing operators to hot-swap between **`⚡ TypeScript (V8)`** and **`🚀 C++ Native (-O3)`** with real-time microsecond latency readouts on the live map.
 
 ---
@@ -275,11 +276,13 @@ The suite covers algorithmic correctness, concurrency safety, edge-case recovery
 ### Aggregate runners
 
 ```bash
-pnpm build:cpp                                 # once — suite 12 needs engine_bridge.exe
-pnpm test:all                                   # 13 core suites  (~40s)
-pnpm test:all:stress                            # 17 core + stress (~105s)
+pnpm build:cpp                                 # once - suites 11 & 12 need engine_bridge.exe
+pnpm test                                       # 14 core suites (~40s) - same gate CI runs
+pnpm typecheck                                  # tsc --noEmit, must be 0 errors
+pnpm test:all:stress                            # 18 suites (14 core + 4 stress, ~105s)
 pnpm exec tsx tests/integration_all.ts --only matching   # single suite, by filename substring
 ```
+
 
 A suite passes when it exits `0` **and** its output carries no failure marker — several suites assert through console output rather than `process.exit`, so exit code alone is not trustworthy.
 
@@ -305,29 +308,32 @@ A suite passes when it exits `0` **and** its output carries no failure marker �
 
 ### HTTP/WebSocket end-to-end
 
-Suites 13, 15 and 16 boot a **real server process** through `tests/helpers/e2e_harness.ts`, which refuses to start if the port already answers (a leftover server would otherwise satisfy `/health` while the fresh one dies on `EADDRINUSE`) and reaps the whole process tree on teardown. They use ports **3997–3999**.
+Suites 13, 15 and 16 boot a **real server process** through `tests/helpers/e2e_harness.ts`, which refuses to start if the port already answers (a leftover server would otherwise satisfy `/health` while the fresh one dies on `EADDRINUSE`) and reaps the whole process tree on teardown — **including on Ctrl+C**, so an interrupted run can't strand the port. If a port is still occupied, the guard prints the exact command to clear it for your platform (`netstat` + `taskkill` on Windows, `lsof` + `kill` elsewhere). They use ports **3997–3999**.
 
 `tests/stress_ride_matching.ts` runs two phases: a contention-free *utilization* pass (one ride per driver → the whole fleet must match) followed by an oversubscribed *storm*, asserting no driver ever holds two trips at once, no lock leaks, and full repopulation of the spatial index.
 
 ```bash
-pnpm exec tsx tests/stress_ride_matching.ts
+pnpm test:storm                                # concurrent ride storm
 
 # scale it up / down (defaults: 60 drivers, 300 rides, 2 waves)
-STRESS_DRIVERS=120 STRESS_RIDES=600 STRESS_WAVES=3 pnpm exec tsx tests/stress_ride_matching.ts
+STRESS_DRIVERS=120 STRESS_RIDES=600 STRESS_WAVES=3 pnpm test:storm
 
 # PowerShell
-$env:STRESS_DRIVERS=120; $env:STRESS_RIDES=600; pnpm exec tsx tests/stress_ride_matching.ts
+$env:STRESS_DRIVERS=120; $env:STRESS_RIDES=600; pnpm test:storm
 ```
 
 ### Individual suites
 
 ```bash
-pnpm test:audit          # audit fixes & security invariants
-pnpm test:concurrency    # 2-rider race + 2,000-request stress
-pnpm test:integration    # integration edge cases
+pnpm test:e2e          # HTTP + WS ride lifecycle contract (real server)
+pnpm test:e2e:cpp      # full server with the C++ engine selected
+pnpm test:storm        # concurrent ride storm through the HTTP API
+pnpm test:audit        # audit fixes & security invariants
+pnpm test:concurrency  # 2-rider race + 2,000-request stress
+pnpm test:integration  # integration edge cases
 pnpm test:state-machine  # trip state machine
-pnpm test:matching       # matching service offer loop
-pnpm test:quadtree       # PR-QuadTree + k-NN
+pnpm test:matching     # matching service offer loop
+pnpm test:quadtree     # PR-QuadTree + k-NN
 pnpm exec tsx tests/test_cpp_bridge.ts
 ```
 
@@ -380,6 +386,12 @@ pnpm start
 pnpm dev
 ```
 
+The server binds `127.0.0.1` by default, because the WebSocket gateway accepts a
+self-asserted `role` and `id` with no authentication. To reach it from another
+device on your network, set `HOST` to a non-loopback address **and** a
+`CONTROL_API_TOKEN`; the server refuses to start otherwise. See
+[CONTRIBUTING.md](CONTRIBUTING.md#security-model) for the details.
+
 Open **`http://localhost:3000`** in your browser:
 
 1. **Explore the Map**: Pan to any city on Earth and click **"Seed in Visible View"**.
@@ -391,4 +403,6 @@ Open **`http://localhost:3000`** in your browser:
 
 ## License
 
-MIT License. Designed and engineered for high-scale spatial systems demonstration.
+[MIT License](LICENSE). Designed and engineered for high-scale spatial systems demonstration.
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).

@@ -1,7 +1,10 @@
 export class MinHeap<T> {
   private heap: T[] = [];
+  private readonly compare: (a: T, b: T) => number;
 
-  constructor(private readonly compare: (a: T, b: T) => number) {}
+  constructor(compare: (a: T, b: T) => number) {
+    this.compare = compare;
+  }
 
   public get size(): number {
     return this.heap.length;
