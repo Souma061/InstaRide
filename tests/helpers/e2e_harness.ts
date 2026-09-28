@@ -239,12 +239,19 @@ export class WsTap {
     this.ws = ws;
   }
 
-  static connect(port: number, role: string, id?: string): Promise<WsTap> {
+  static connect(
+    port: number,
+    role: string,
+    id?: string,
+    origin?: string,
+  ): Promise<WsTap> {
     const url = `ws://127.0.0.1:${port}/ws?role=${role}${
       id ? `&id=${encodeURIComponent(id)}` : ""
     }`;
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(url);
+      const ws = origin
+        ? new WebSocket(url, { headers: { Origin: origin } })
+        : new WebSocket(url);
       const tap = new WsTap(ws);
       const timer = setTimeout(() => {
         reject(new Error(`ws open timeout for ${url}`));

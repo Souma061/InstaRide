@@ -28,6 +28,7 @@ const SUITES: Suite[] = [
   { file: "test_trip_state_machine.ts", what: "trip state machine", tier: "core" },
   { file: "test_matching_service.ts", what: "matching service", tier: "core" },
   { file: "test_audit_fixes.ts", what: "audit-fix regression suite", tier: "core" },
+  { file: "test_control_access.ts", what: "control gateway auth + WS origin", tier: "core" },
   { file: "test_integration_edge_cases.ts", what: "integration edge cases", tier: "core" },
   { file: "test_concurrency_race.ts", what: "double-dispatch race", tier: "core" },
   { file: "test_redis_driver_lock.ts", what: "redis lock invariants", tier: "core" },
