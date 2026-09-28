@@ -3,11 +3,17 @@
   "version": "1.0.0",
   "type": "module",
   "description": "Real-Time Ride Matching Platform",
+  "license": "MIT",
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
     "start": "tsx src/server.ts",
-    "test": "tsx tests/test_driver_registry.ts",
+    "test": "tsx tests/integration_all.ts",
     "test:registry": "tsx tests/test_driver_registry.ts",
     "test:concurrency": "tsx tests/test_concurrency_race.ts",
     "test:quadtree": "tsx tests/test_quadtree.ts",
