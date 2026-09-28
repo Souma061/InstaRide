@@ -12,11 +12,13 @@ concurrency:
 
 jobs:
   verify:
-    # The aggregate runner (tests/integration_all.ts) hardcodes a Windows path
-    # separator and the e2e harness reaps process trees with taskkill /T, so
-    # the suite is only verified on Windows. Do not switch this runner without
-    # porting those two call sites first.
-    runs-on: windows-latest
+    # Linux runner, not just for the Redis service container (GitHub only
+    # supports those on Linux) but because the suite is platform-neutral: the
+    # native engine is a plain executable behind a stdio pipe, and the test
+    # harness spawns detached process groups rather than shelling out to
+    # taskkill. The koffi FFI suites are stress-tier only and load Windows
+    # DLLs, so they stay out of CI.
+    runs-on: ubuntu-latest
     timeout-minutes: 25
 
     services:
@@ -54,16 +56,10 @@ jobs:
       - name: Type check
         run: pnpm typecheck
 
-      # Two core suites drive engine_bridge.exe through koffi, and the binary is
-      # gitignored — a fresh checkout has none until this runs.
-      - name: Verify C++ toolchain
-        run: |
-          if (-not (Get-Command g++ -ErrorAction SilentlyContinue)) {
-            if (Test-Path "C:\mingw64\bin\g++.exe") { $env:Path += ";C:\mingw64\bin" }
-            else { choco install mingw -y --no-progress }
-          }
-          g++ --version
-
+      # Two core suites drive the engine binary through its stdio protocol, and
+      # the binary is gitignored — a fresh checkout has none until this runs.
+      # The output is named .exe for historical reasons; it is an ordinary
+      # native executable on whatever platform built it.
       - name: Build native engine
         run: pnpm build:cpp
 

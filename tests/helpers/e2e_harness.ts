@@ -1,13 +1,15 @@
 import { spawn, spawnSync, ChildProcess } from "node:child_process";
 
 function killTree(child: ChildProcess) {
-  // spawn() with shell:true leaves node as a grandchild; taskkill /T reaps
-  // the whole tree so the next run finds a free port.
+  // spawn() with shell:true leaves the real process as a grandchild; a bare
+  // kill() leaves it listening on its port. Windows needs taskkill /T; POSIX
+  // needs the process group, which only exists because we spawn detached.
   try {
-    if (process.platform === "win32" && child.pid) {
+    if (!child.pid) return;
+    if (process.platform === "win32") {
       spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
     } else {
-      child.kill();
+      process.kill(-child.pid, "SIGKILL");
     }
   } catch {
     /* already dead */
@@ -104,16 +106,21 @@ export async function startServer(port: number): Promise<Api> {
   // A leftover server from a previous run would answer /health while the fresh
   // one dies on EADDRINUSE — fail fast instead of testing the wrong process.
   if (await portInUse(port)) {
+    const hint =
+      process.platform === "win32"
+        ? `  netstat -ano | findstr :${port}\n  taskkill /pid <pid> /T /F`
+        : `  lsof -ti tcp:${port} | xargs -r kill -9`;
     throw new Error(
       `port ${port} is already in use — a leftover test server from an earlier ` +
         `run. Kill it, then retry:\n` +
-        `  netstat -ano | findstr :${port}\n` +
-        `  taskkill /pid <pid> /T /F`,
+        hint,
     );
   }
 
   const child = spawn("npx", ["tsx", "src/server.ts"], {
     shell: true,
+    // Own process group on POSIX so killTree can reap the tree.
+    detached: process.platform !== "win32",
     cwd: process.cwd(),
     env: {
       ...process.env,

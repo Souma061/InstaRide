@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import path from "node:path";
 
 /**
  * Aggregate integration runner: executes every test suite in this folder
@@ -35,7 +36,7 @@ const SUITES: Suite[] = [
   { file: "test_redis_trip_store.ts", what: "redis trip store invariants", tier: "core" },
   { file: "test_full_redis_matching_integration.ts", what: "end-to-end redis matching", tier: "core" },
   { file: "test_cpp_bridge.ts", what: "C++ bridge spawn/protocol", tier: "core" },
-  { file: "test_cpp_engine_e2e.ts", what: "engine_bridge.exe via koffi", tier: "core" },
+  { file: "test_cpp_engine_e2e.ts", what: "engine_bridge stdio IPC", tier: "core" },
   { file: "test_full_integration_stress.ts", what: "C++ DLLs + redis + concurrency", tier: "stress" },
   { file: "e2e_ride_matching_api.ts", what: "HTTP+WS ride lifecycle contract", tier: "core" },
   { file: "e2e_server_cpp_engine.ts", what: "full server over HTTP with C++ engine", tier: "stress" },
@@ -59,13 +60,16 @@ if (selected.length === 0) {
 }
 
 function killTree(child: ReturnType<typeof spawn>) {
-  // shell:true spawns node as a grandchild; a bare kill() leaves test servers
-  // listening on their port and makes the next suite fail with EADDRINUSE.
+  // shell:true spawns the real process as a grandchild; a bare kill() leaves
+  // test servers listening on their port and makes the next suite fail with
+  // EADDRINUSE. Windows needs taskkill /T; POSIX needs the process group,
+  // which only exists because we spawn detached (see run()).
   try {
-    if (process.platform === "win32" && child.pid) {
+    if (!child.pid) return;
+    if (process.platform === "win32") {
       spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
     } else {
-      child.kill();
+      process.kill(-child.pid, "SIGKILL");
     }
   } catch {
     /* already dead */
@@ -74,8 +78,13 @@ function killTree(child: ReturnType<typeof spawn>) {
 
 function run(suite: Suite): Promise<{ ms: number; code: number; out: string; timedOut: boolean }> {
   return new Promise((resolve) => {
-    const child = spawn(`npx tsx "tests\\${suite.file}"`, {
+    // path.join keeps this correct on Windows and POSIX. The engine binary is
+    // a plain executable, so the .exe suffix is not a portability problem.
+    const child = spawn(`npx tsx "${path.join("tests", suite.file)}"`, {
       shell: true,
+      // Gives the child its own process group on POSIX so killTree can reap
+      // the whole tree; a no-op difference on Windows.
+      detached: process.platform !== "win32",
       env: { ...process.env, FORCE_COLOR: "0", NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --max-old-space-size=4096`.trim() },
       stdio: ["ignore", "pipe", "pipe"],
     });

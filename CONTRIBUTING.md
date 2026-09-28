@@ -14,6 +14,8 @@ trip state machine.
 | Redis | any recent | yes — the suites exercise the Redis lock and trip-store invariants |
 | GCC / MinGW-w64 or Clang | C++14 | only for the native engine |
 
+Windows, macOS, and Linux all work. CI runs on `ubuntu-latest`.
+
 ## Setup
 
 ```bash
@@ -101,9 +103,9 @@ pnpm exec tsx tests/integration_all.ts --only redis
 ### The stress tier
 
 `pnpm test:all:stress` adds four long-running suites that need the H3
-libraries (`libh3.dll`, `hexgrid.dll`). Those are third-party prebuilt
-binaries and are gitignored, so build them from `cpp-engine/h3api.h` first.
-CI does not run the stress tier.
+libraries (`libh3.dll`, `hexgrid.dll`) and the koffi FFI. Those are Windows
+prebuilt binaries and are gitignored, so build them from `cpp-engine/h3api.h`
+first. CI does not run the stress tier, and it is currently Windows-only.
 
 ## Making a change
 
