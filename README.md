@@ -305,29 +305,32 @@ A suite passes when it exits `0` **and** its output carries no failure marker �
 
 ### HTTP/WebSocket end-to-end
 
-Suites 13, 15 and 16 boot a **real server process** through `tests/helpers/e2e_harness.ts`, which refuses to start if the port already answers (a leftover server would otherwise satisfy `/health` while the fresh one dies on `EADDRINUSE`) and reaps the whole process tree on teardown. They use ports **3997–3999**.
+Suites 13, 15 and 16 boot a **real server process** through `tests/helpers/e2e_harness.ts`, which refuses to start if the port already answers (a leftover server would otherwise satisfy `/health` while the fresh one dies on `EADDRINUSE`) and reaps the whole process tree on teardown — **including on Ctrl+C**, so an interrupted run can't strand the port. If a port is still occupied, the guard prints the exact `netstat` / `taskkill` command to clear it. They use ports **3997–3999**.
 
 `tests/stress_ride_matching.ts` runs two phases: a contention-free *utilization* pass (one ride per driver → the whole fleet must match) followed by an oversubscribed *storm*, asserting no driver ever holds two trips at once, no lock leaks, and full repopulation of the spatial index.
 
 ```bash
-pnpm exec tsx tests/stress_ride_matching.ts
+pnpm test:storm                                # concurrent ride storm
 
 # scale it up / down (defaults: 60 drivers, 300 rides, 2 waves)
-STRESS_DRIVERS=120 STRESS_RIDES=600 STRESS_WAVES=3 pnpm exec tsx tests/stress_ride_matching.ts
+STRESS_DRIVERS=120 STRESS_RIDES=600 STRESS_WAVES=3 pnpm test:storm
 
 # PowerShell
-$env:STRESS_DRIVERS=120; $env:STRESS_RIDES=600; pnpm exec tsx tests/stress_ride_matching.ts
+$env:STRESS_DRIVERS=120; $env:STRESS_RIDES=600; pnpm test:storm
 ```
 
 ### Individual suites
 
 ```bash
-pnpm test:audit          # audit fixes & security invariants
-pnpm test:concurrency    # 2-rider race + 2,000-request stress
-pnpm test:integration    # integration edge cases
+pnpm test:e2e          # HTTP + WS ride lifecycle contract (real server)
+pnpm test:e2e:cpp      # full server with the C++ engine selected
+pnpm test:storm        # concurrent ride storm through the HTTP API
+pnpm test:audit        # audit fixes & security invariants
+pnpm test:concurrency  # 2-rider race + 2,000-request stress
+pnpm test:integration  # integration edge cases
 pnpm test:state-machine  # trip state machine
-pnpm test:matching       # matching service offer loop
-pnpm test:quadtree       # PR-QuadTree + k-NN
+pnpm test:matching     # matching service offer loop
+pnpm test:quadtree     # PR-QuadTree + k-NN
 pnpm exec tsx tests/test_cpp_bridge.ts
 ```
 

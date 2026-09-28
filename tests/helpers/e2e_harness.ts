@@ -1,5 +1,19 @@
 import { spawn, spawnSync, ChildProcess } from "node:child_process";
 
+function killTree(child: ChildProcess) {
+  // spawn() with shell:true leaves node as a grandchild; taskkill /T reaps
+  // the whole tree so the next run finds a free port.
+  try {
+    if (process.platform === "win32" && child.pid) {
+      spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
+    } else {
+      child.kill();
+    }
+  } catch {
+    /* already dead */
+  }
+}
+
 async function portInUse(port: number): Promise<boolean> {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), 500);
@@ -90,7 +104,12 @@ export async function startServer(port: number): Promise<Api> {
   // A leftover server from a previous run would answer /health while the fresh
   // one dies on EADDRINUSE — fail fast instead of testing the wrong process.
   if (await portInUse(port)) {
-    throw new Error(`port ${port} already in use (leftover test server?)`);
+    throw new Error(
+      `port ${port} is already in use — a leftover test server from an earlier ` +
+        `run. Kill it, then retry:\n` +
+        `  netstat -ano | findstr :${port}\n` +
+        `  taskkill /pid <pid> /T /F`,
+    );
   }
 
   const child = spawn("npx", ["tsx", "src/server.ts"], {
@@ -129,25 +148,33 @@ export async function startServer(port: number): Promise<Api> {
       };
     },
     stop: async () => {
-      // spawn() with shell:true leaves node as a grandchild; taskkill /T
-      // reaps the whole tree so the next run finds a free port.
-      try {
-        if (process.platform === "win32" && child.pid) {
-          spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
-        } else {
-          child.kill();
-        }
-      } catch {
-        /* already dead */
-      }
+      killTree(child);
       await sleep(400);
     },
   };
 
+  // Ctrl+C / a thrown error must not strand the server: a surviving node
+  // grandchild owns the port and blocks every later run.
+  let reaped = false;
+  const reap = () => {
+    if (reaped) return;
+    reaped = true;
+    killTree(child);
+  };
+  process.once("exit", reap);
+  process.once("SIGINT", () => {
+    reap();
+    process.exit(130);
+  });
+  process.once("SIGTERM", () => {
+    reap();
+    process.exit(143);
+  });
+
   const abort = setTimeout(() => {
     console.error("---- server log tail ----");
     console.error(logs.slice(-50).join(""));
-    child.kill();
+    reap();
   }, 75_000);
 
   try {
@@ -206,7 +233,11 @@ export class WsTap {
   readonly messages: any[] = [];
   private readonly waiters: Waiter[] = [];
 
-  private constructor(private readonly ws: WebSocket) {}
+  private readonly ws: WebSocket;
+
+  private constructor(ws: WebSocket) {
+    this.ws = ws;
+  }
 
   static connect(port: number, role: string, id?: string): Promise<WsTap> {
     const url = `ws://127.0.0.1:${port}/ws?role=${role}${
