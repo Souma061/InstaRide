@@ -63,5 +63,5 @@ jobs:
       - name: Build native engine
         run: pnpm build:cpp
 
-      - name: Test (13 core suites)
+      - name: Test (14 core suites)
         run: pnpm test
