@@ -83,7 +83,7 @@ half-built auth layer.
 
 ```bash
 pnpm typecheck    # tsc --noEmit, must be 0 errors
-pnpm test         # 13 core suites, non-zero exit on any failure
+pnpm test         # 14 core suites, non-zero exit on any failure
 ```
 
 `pnpm test` is the gate CI runs — it is the aggregate runner
@@ -138,7 +138,7 @@ Keep the subject imperative and under ~72 characters.
 ## Pull requests
 
 - Open a PR rather than pushing to `main`. CI must be green: `typecheck` plus
-  the 13 core suites.
+  the 14 core suites.
 - Describe the behaviour change and how you verified it.
 - If you touch the spatial engines, matching service, trip FSM, or the Redis
   locking layer, say which invariant you relied on — those parts have subtle

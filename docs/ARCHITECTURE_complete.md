@@ -128,7 +128,7 @@ Node.js spawns the C++ engine as a child process. Communication goes over stdin/
 
 **TypeScript fallback (`src/spatial/quadtree.ts`):**
 
-A pure TypeScript Quadtree implementation exists for environments where C++ compilation is not possible (CI, Windows without MSVC, Docker without build stage). The `CppSpatialBridge` (`src/spatial/cpp_spatial_bridge.ts`) wraps both and selects based on `SPATIAL_ENGINE=cpp` env var.
+A pure TypeScript Quadtree implementation exists for environments where C++ compilation is not possible (Windows without MSVC, Docker without a build stage). The `CppSpatialBridge` (`src/spatial/cpp_spatial_bridge.ts`) wraps both and selects based on `SPATIAL_ENGINE=cpp` env var.
 
 ---
 

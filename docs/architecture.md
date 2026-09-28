@@ -120,7 +120,7 @@ graph TB
 
 - **Role**: High-throughput standalone spatial accelerator. Does not act as an independent source of truth; rather, it mirrors the active operating region and accelerates $k$-NN spatial queries via compiled machine code.
 - **IPC Streaming Bridge**: Node.js communicates with `engine_bridge.exe` via OS standard I/O pipes (`stdin` / `stdout`). Commands (`INSERT`, `UPDATE`, `REMOVE`, `KNN`) are serialized across process boundaries asynchronously with sub-millisecond overhead.
-- **Hardware-Precise Telemetry**: Uses Windows' `QueryPerformanceCounter` (QPC) to measure raw spatial search latency down to sub-microsecond precision ($15.83\ \mu s$ across 1 Million entities).
+- **Hardware-Precise Telemetry**: Uses Windows' `QueryPerformanceCounter` (QPC) to measure raw spatial search latency down to sub-microsecond precision ($15.83\ \mu s$ across 1 Million entities), falling back to `std::chrono::high_resolution_clock` elsewhere.
 - **Graceful Degradation**: If the C++ binary is stopped or rebuilding, the system falls back seamlessly to the in-memory TypeScript PR-QuadTree with zero service interruption.
 
 ---

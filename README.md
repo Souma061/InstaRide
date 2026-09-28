@@ -124,7 +124,7 @@ sequenceDiagram
 InstaRide includes both an in-memory TypeScript PR-QuadTree and a compiled native **C++ PR-QuadTree** (`cpp-engine/Quadtree.hpp`):
 
 - **Zero-Dependency Stdio IPC Bridge**: Rather than relying on fragile native addon compilers (`node-gyp`), Node.js communicates with `engine_bridge.exe` via high-throughput standard I/O operating system pipes (`std::cin` / `std::cout`) with sub-millisecond round-trip times.
-- **Hardware-Precise Microsecond Timing**: The C++ engine leverages Windows' hardware `QueryPerformanceCounter` (QPC) to measure exact spatial search execution down to sub-microsecond precision.
+- **Hardware-Precise Microsecond Timing**: The C++ engine leverages Windows' hardware `QueryPerformanceCounter` (QPC) to measure exact spatial search execution down to sub-microsecond precision, falling back to `std::chrono::high_resolution_clock` on other platforms.
 - **Dynamic Frontend Engine Switcher**: The React 19 UI features a live toolbar toggle allowing operators to hot-swap between **`⚡ TypeScript (V8)`** and **`🚀 C++ Native (-O3)`** with real-time microsecond latency readouts on the live map.
 
 ---
@@ -277,9 +277,9 @@ The suite covers algorithmic correctness, concurrency safety, edge-case recovery
 
 ```bash
 pnpm build:cpp                                 # once - suites 11 & 12 need engine_bridge.exe
-pnpm test                                       # 13 core suites (~40s) - same gate CI runs
+pnpm test                                       # 14 core suites (~40s) - same gate CI runs
 pnpm typecheck                                  # tsc --noEmit, must be 0 errors
-pnpm test:all:stress                            # 17 core + stress (~105s)
+pnpm test:all:stress                            # 18 suites (14 core + 4 stress, ~105s)
 pnpm exec tsx tests/integration_all.ts --only matching   # single suite, by filename substring
 ```
 
@@ -308,7 +308,7 @@ A suite passes when it exits `0` **and** its output carries no failure marker �
 
 ### HTTP/WebSocket end-to-end
 
-Suites 13, 15 and 16 boot a **real server process** through `tests/helpers/e2e_harness.ts`, which refuses to start if the port already answers (a leftover server would otherwise satisfy `/health` while the fresh one dies on `EADDRINUSE`) and reaps the whole process tree on teardown — **including on Ctrl+C**, so an interrupted run can't strand the port. If a port is still occupied, the guard prints the exact `netstat` / `taskkill` command to clear it. They use ports **3997–3999**.
+Suites 13, 15 and 16 boot a **real server process** through `tests/helpers/e2e_harness.ts`, which refuses to start if the port already answers (a leftover server would otherwise satisfy `/health` while the fresh one dies on `EADDRINUSE`) and reaps the whole process tree on teardown — **including on Ctrl+C**, so an interrupted run can't strand the port. If a port is still occupied, the guard prints the exact command to clear it for your platform (`netstat` + `taskkill` on Windows, `lsof` + `kill` elsewhere). They use ports **3997–3999**.
 
 `tests/stress_ride_matching.ts` runs two phases: a contention-free *utilization* pass (one ride per driver → the whole fleet must match) followed by an oversubscribed *storm*, asserting no driver ever holds two trips at once, no lock leaks, and full repopulation of the spatial index.
 
@@ -385,6 +385,12 @@ pnpm start
 # For hot-reload development mode:
 pnpm dev
 ```
+
+The server binds `127.0.0.1` by default, because the WebSocket gateway accepts a
+self-asserted `role` and `id` with no authentication. To reach it from another
+device on your network, set `HOST` to a non-loopback address **and** a
+`CONTROL_API_TOKEN`; the server refuses to start otherwise. See
+[CONTRIBUTING.md](CONTRIBUTING.md#security-model) for the details.
 
 Open **`http://localhost:3000`** in your browser:
 
