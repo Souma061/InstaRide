@@ -10,7 +10,10 @@ build/
 *.o
 *.obj
 *.gch
+*.pch
 *.dll
+*.a
+*.lib
 *.so
 *.dylib
 
@@ -34,3 +37,8 @@ Thumbs.db
 .idea/
 *.sublime-project
 *.sublime-workspace
+
+# Local scratch — do not commit throwaway prototypes
+/tree.cpp
+/tree.js
+
