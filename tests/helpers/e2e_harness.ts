@@ -1,4 +1,7 @@
 import { spawn, spawnSync, ChildProcess } from "node:child_process";
+// Imported rather than using the global: Node only exposes a global WebSocket
+// from v22, and this package declares support for Node >= 20.
+import WebSocket from "ws";
 
 function killTree(child: ChildProcess) {
   // spawn() with shell:true leaves the real process as a grandchild; a bare
