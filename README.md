@@ -9,7 +9,7 @@
 [![Tests](https://img.shields.io/badge/Tests-Passing-emerald.svg)](https://github.com/Souma061/InstaRide/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A high-performance, real-time ride-matching platform and interactive spatial dashboard that matches riders to the nearest available drivers in sub-millisecond speeds. Features a **dual-engine architecture** with both an in-memory **TypeScript PR-QuadTree** and a **Native C++ (`-O3`) spatial accelerator** connected via a zero-dependency Stdio IPC bridge, **atomic CAS lock leases**, and a **deterministic trip finite state machine**—completely free of managed geospatial databases (no Redis Geo, no PostGIS). Tested and verified against **1,000,000 (1 Million) concurrent drivers**, a **3,000,000-point** spatial stress harness, and a 17-suite integration gate (`pnpm test:all:stress`).
+A high-performance, real-time ride-matching platform and interactive spatial dashboard that matches riders to the nearest available drivers in sub-millisecond speeds. Features a **dual-engine architecture** with both an in-memory **TypeScript PR-QuadTree** and a **Native C++ (`-O3`) spatial accelerator** connected via a zero-dependency Stdio IPC bridge, **atomic CAS lock leases**, and a **deterministic trip finite state machine**—completely free of managed geospatial databases (no Redis Geo, no PostGIS). Tested and verified against **1,000,000 (1 Million) concurrent drivers**, a **3,000,000-point** spatial stress harness, and an **18-suite integration gate** (`pnpm test:all:stress` across 14 core and 4 stress suites).
 
 ---
 
@@ -215,6 +215,8 @@ graph TD
 
 ## Security, Ownership & Invariant Hardening
 
+- **Control Gateway Access Gate**: `HOST` binds `127.0.0.1` by default. Binding to non-loopback interfaces (including the wildcard `0.0.0.0`) strictly requires `CONTROL_API_TOKEN` via `Authorization: Bearer <token>`; the server refuses to boot otherwise, preventing unauthenticated control-gateway exposure.
+- **WebSocket Cross-Site Origin Shield**: The `/ws` upgrade performs an `Origin` header verification, blocking cross-site browser handshakes (which lack CORS preflight protection) while permitting local Vite dev-server proxies.
 - **Ownership-Guarded Cancellation**: `POST /rides/:tripId/cancel` verifies that the caller owns the ride (`trip.riderId === riderId`), preventing unauthorized cancellations.
 - **Driver Action Verification**: `POST /trips/:tripId/driver-action` enforces `driverId === trip.driverId`, ensuring unrelated drivers cannot advance a trip's lifecycle or mark themselves available prematurely.
 - **Strict Offer Response Validation**: `POST /trips/driver-response` only accepts strict `"accepted"` or `"rejected"` payloads. Invalid payloads are rejected without stranding driver locks.
@@ -225,7 +227,26 @@ graph TD
 
 ---
 
+## Observability & Prometheus Metrics
+
+InstaRide includes built-in Prometheus instrumentation via `prom-client` exposed at `GET /metrics` and a pre-configured Docker Compose monitoring stack (`docker-compose.monitoring.yml`):
+
+- **Real-Time Instrumentation**:
+  - `instaride_spatial_query_duration_seconds`: Histogram of $k$-NN candidate lookup latencies across both spatial engines.
+  - `instaride_active_drivers` & `instaride_available_drivers`: Real-time gauges of fleet capacity and available search pool.
+  - `instaride_trip_state_count`: Distribution of active trips across FSM lifecycle milestones.
+  - `instaride_lock_contention_total`: Collision counter tracking CAS contention and candidate fallbacks.
+- **Pre-Configured Grafana Dashboard**:
+  - Spin up Redis, Prometheus, and Grafana in one command: `pnpm monitoring:up`.
+  - Prometheus (`http://localhost:9090`) scrapes Fastify's `/metrics` every 5 seconds.
+  - Grafana (`http://localhost:3001`, default credentials `admin` / `admin`) auto-provisions the **InstaRide Overview** dashboard (`monitoring/grafana/dashboards/instaride-overview.json`).
+
+---
+
 ## REST API Reference
+
+> [!NOTE]
+> If `HOST` is bound to a non-loopback address (or `0.0.0.0`), all endpoints require `Authorization: Bearer <CONTROL_API_TOKEN>`. On loopback (`127.0.0.1`), authentication is bypassed for local development.
 
 ### Ride Operations
 
@@ -236,15 +257,18 @@ graph TD
 | `POST` | `/trips/:tripId/driver-action` | Advance trip milestone (`arrived`, `start_trip`, `complete_trip`) | Enforces `driverId === trip.driverId`              |
 | `POST` | `/trips/driver-response`       | Accept or reject match offer                                      | Strictly `"accepted"` or `"rejected"`              |
 
-### Fleet & Simulation
+### Fleet, Engine & Simulation
 
 | Method | Endpoint                      | Description                                                    |
 | :----- | :---------------------------- | :------------------------------------------------------------- |
 | `GET`  | `/drivers`                    | Snapshot of all virtual drivers, coordinates, and lock states  |
 | `POST` | `/drivers/spawn`              | Hot-insert an available driver at exact GPS coordinates        |
+| `GET`  | `/api/engine/status`          | Query active spatial engine (`cpp` / `typescript`) & telemetry |
+| `POST` | `/api/engine/select`          | Hot-swap active engine (`{"engine": "cpp" \| "typescript"}`)    |
 | `POST` | `/simulator/reset`            | Reseed region bounds and driver fleet ($1$ to $500$)           |
 | `POST` | `/simulator/concurrency-race` | Run simultaneous 2-rider race and return CAS evidence dossier  |
 | `GET`  | `/config`                     | Read active city, bounding box, fleet size, and QuadTree stats |
+| `GET`  | `/metrics`                    | Prometheus formatted metrics endpoint                          |
 | `GET`  | `/health`                     | Service health status and timestamp                            |
 
 ---
@@ -271,18 +295,17 @@ Connect to the multiplexed gateway at `ws://localhost:3000/ws?role={role}&id={id
 
 ## Testing & Verification
 
-The suite covers algorithmic correctness, concurrency safety, edge-case recovery, API security, and full-stack HTTP/WebSocket behaviour. **A local Redis on `127.0.0.1:6379` is required** for the aggregate runners.
+The suite covers algorithmic correctness, concurrency safety, edge-case recovery, API security, and full-stack HTTP/WebSocket behaviour. **A local Redis on `127.0.0.1:6379` is required** for the aggregate runners (launch easily with `pnpm monitoring:up`).
 
 ### Aggregate runners
 
 ```bash
-pnpm build:cpp                                 # once - suites 11 & 12 need engine_bridge.exe
+pnpm build:cpp                                 # once - suites 11, 12, & 13 need engine_bridge.exe
 pnpm test                                       # 14 core suites (~40s) - same gate CI runs
 pnpm typecheck                                  # tsc --noEmit, must be 0 errors
 pnpm test:all:stress                            # 18 suites (14 core + 4 stress, ~105s)
 pnpm exec tsx tests/integration_all.ts --only matching   # single suite, by filename substring
 ```
-
 
 A suite passes when it exits `0` **and** its output carries no failure marker — several suites assert through console output rather than `process.exit`, so exit code alone is not trustworthy.
 
@@ -293,22 +316,23 @@ A suite passes when it exits `0` **and** its output carries no failure marker �
 | 3 | `test_trip_state_machine.ts` | core | FSM transition matrix + invariants (22 checks) |
 | 4 | `test_matching_service.ts` | core | Offer loop, deadline budget, fallback cascade, guard rails (115 checks) |
 | 5 | `test_audit_fixes.ts` | core | Regression suite for every audit finding (50 checks) |
-| 6 | `test_integration_edge_cases.ts` | core | Region reset, socket reconnect, accept/cancel race (11 checks) |
-| 7 | `test_concurrency_race.ts` | core | 2-rider race + burst — **0% duplicate dispatch** |
-| 8 | `test_redis_driver_lock.ts` | core | Redis lease: TTL expiry, steal-proofing, swarm contention |
-| 9 | `test_redis_trip_store.ts` | core | Redis trip store invariants |
-| 10 | `test_full_redis_matching_integration.ts` | core | 7 end-to-end Redis edge cases, incl. stale-state healing |
-| 11 | `test_cpp_bridge.ts` | core | C++ bridge spawn + stdio protocol |
-| 12 | `test_cpp_engine_e2e.ts` | core | `engine_bridge.exe` invoked through koffi |
-| 13 | `e2e_ride_matching_api.ts` | core | Real server over HTTP + WS: validation, full ride lifecycle, deadman timeout, idempotency, cancel, driver contention (53 checks) |
-| 14 | `test_full_integration_stress.ts` | stress | C++ DLLs + Redis + concurrency burst |
-| 15 | `e2e_server_cpp_engine.ts` | stress | Full server over HTTP with the C++ engine selected |
-| 16 | `stress_ride_matching.ts` | stress | Concurrent ride storm through the HTTP API (26 checks) |
-| 17 | `benchmark_3M_ts.ts` | stress | 3,000,000-point quadtree build + query stress |
+| 6 | `test_control_access.ts` | core | Control gateway token gate (wildcard/non-loopback) + WS origin verification |
+| 7 | `test_integration_edge_cases.ts` | core | Region reset, socket reconnect, accept/cancel race (11 checks) |
+| 8 | `test_concurrency_race.ts` | core | 2-rider race + burst — **0% duplicate dispatch** |
+| 9 | `test_redis_driver_lock.ts` | core | Redis lease: TTL expiry, steal-proofing, swarm contention |
+| 10 | `test_redis_trip_store.ts` | core | Redis trip store invariants |
+| 11 | `test_full_redis_matching_integration.ts` | core | 7 end-to-end Redis edge cases, incl. stale-state healing |
+| 12 | `test_cpp_bridge.ts` | core | C++ bridge spawn + stdio protocol |
+| 13 | `test_cpp_engine_e2e.ts` | core | `engine_bridge.exe` stdio IPC coordinate fidelity & lifecycle |
+| 14 | `test_full_integration_stress.ts` | stress | C++ spatial bridge + Redis + concurrency burst |
+| 15 | `e2e_ride_matching_api.ts` | core | Real server over HTTP + WS: validation, full ride lifecycle, deadman timeout, idempotency, cancel, driver contention (53 checks) |
+| 16 | `e2e_server_cpp_engine.ts` | stress | Full server over HTTP with the C++ engine selected |
+| 17 | `stress_ride_matching.ts` | stress | Concurrent ride storm through the HTTP API (26 checks) |
+| 18 | `benchmark_3M_ts.ts` | stress | 3,000,000-point quadtree build + query stress |
 
 ### HTTP/WebSocket end-to-end
 
-Suites 13, 15 and 16 boot a **real server process** through `tests/helpers/e2e_harness.ts`, which refuses to start if the port already answers (a leftover server would otherwise satisfy `/health` while the fresh one dies on `EADDRINUSE`) and reaps the whole process tree on teardown — **including on Ctrl+C**, so an interrupted run can't strand the port. If a port is still occupied, the guard prints the exact command to clear it for your platform (`netstat` + `taskkill` on Windows, `lsof` + `kill` elsewhere). They use ports **3997–3999**.
+Suites 6, 15, 16 and 17 boot a **real server process** through `tests/helpers/e2e_harness.ts`, which refuses to start if the port already answers (a leftover server would otherwise satisfy `/health` while the fresh one dies on `EADDRINUSE`) and reaps the whole process tree on teardown — **including on Ctrl+C**, so an interrupted run can't strand the port. If a port is still occupied, the guard prints the exact command to clear it for your platform (`netstat` + `taskkill` on Windows, `lsof` + `kill` elsewhere). They use ports **3996–3999**.
 
 `tests/stress_ride_matching.ts` runs two phases: a contention-free *utilization* pass (one ride per driver → the whole fleet must match) followed by an oversubscribed *storm*, asserting no driver ever holds two trips at once, no lock leaks, and full repopulation of the spatial index.
 
@@ -334,7 +358,9 @@ pnpm test:integration  # integration edge cases
 pnpm test:state-machine  # trip state machine
 pnpm test:matching     # matching service offer loop
 pnpm test:quadtree     # PR-QuadTree + k-NN
-pnpm exec tsx tests/test_cpp_bridge.ts
+pnpm test:registry     # driver registry + Redis locks
+pnpm exec tsx tests/test_control_access.ts  # gateway auth & WS origin
+pnpm exec tsx tests/test_cpp_bridge.ts      # C++ bridge stdio IPC
 ```
 
 ### Benchmarks
@@ -360,9 +386,11 @@ pnpm build
 
 - **Node.js**: v20.x or higher
 - **pnpm**: v9.x or higher
-- **C++ Compiler (Optional for C++ engine)**: GCC / MinGW-w64 (supports C++14) or Clang
+- **Redis**: v7.x or higher (or Docker / Docker Compose for the bundled stack)
+- **C++ Compiler (for native engine)**: GCC / MinGW-w64 (supports C++14) or Clang
+- Cross-platform support: **Linux**, **macOS**, and **Windows** (CI verified on `ubuntu-latest`)
 
-### Installation
+### Installation & Setup
 
 ```bash
 # 1. Clone repository
@@ -372,7 +400,16 @@ cd InstaRide
 # 2. Install dependencies
 pnpm install
 
-# 3. Build frontend assets
+# 3. Configure environment
+cp .env.example .env
+
+# 4. Start Redis & Observability stack (Redis on :6379, Prometheus on :9090, Grafana on :3001)
+pnpm monitoring:up
+
+# 5. Compile native C++ engine (required for C++ spatial accelerator & core e2e tests)
+pnpm build:cpp
+
+# 6. Build frontend dashboard assets
 pnpm build:frontend
 ```
 
@@ -395,9 +432,11 @@ device on your network, set `HOST` to a non-loopback address **and** a
 Open **`http://localhost:3000`** in your browser:
 
 1. **Explore the Map**: Pan to any city on Earth and click **"Seed in Visible View"**.
-2. **Book a Ride**: Set Pickup and Dropoff on the Rider tab and click **Dispatch Ride Request**.
-3. **Execute Driver Milestones**: Switch to the Driver view to Accept, Mark Arrived, Start Trip, and Complete.
-4. **Prove Concurrency**: Open the Chaos Suite tab and click **Launch Concurrent Race** to inspect the live CAS collision dossier.
+2. **Toggle Spatial Engine**: Hot-swap between **`⚡ TypeScript (V8)`** and **`🚀 C++ Native (-O3)`** in the toolbar.
+3. **Book a Ride**: Set Pickup and Dropoff on the Rider tab and click **Dispatch Ride Request**.
+4. **Execute Driver Milestones**: Switch to the Driver view to Accept, Mark Arrived, Start Trip, and Complete.
+5. **Prove Concurrency**: Open the Chaos Suite tab and click **Launch Concurrent Race** to inspect the live CAS collision dossier.
+6. **System Telemetry**: Access the live Grafana dashboard at **`http://localhost:3001`** (login `admin` / `admin`).
 
 ---
 
