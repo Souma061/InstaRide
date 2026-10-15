@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Real-Time Ride Matching Platform",
   "license": "MIT",
-  "packageManager": "pnpm@9.15.0",
+  "packageManager": "pnpm@12.10.1",
   "engines": {
     "node": ">=20"
   },
@@ -36,11 +36,18 @@
     "stress:3m:cpp": "g++ -O3 -std=c++14 -I cpp-engine cpp-engine/stress_3M.cpp -L cpp-engine -lh3 -lpsapi -o cpp-engine/stress_3M.exe && cpp-engine\\stress_3M.exe",
     "stress:3m:ts": "tsx tests/benchmark_3M_ts.ts",
     "monitoring:up": "docker compose -f docker-compose.monitoring.yml up -d",
-    "monitoring:down": "docker compose -f docker-compose.monitoring.yml down"
+    "monitoring:down": "docker compose -f docker-compose.monitoring.yml down",
+    "cassandra:up": "docker compose -f docker-compose.cassandra.yml up -d",
+    "cassandra:down": "docker compose -f docker-compose.cassandra.yml down",
+    "experiment:1:showdown": "tsx tests/benchmark_redis_vs_cassandra.ts",
+    "experiment:2:recorder": "tsx tests/test_flight_recorder.ts",
+    "experiment:3:patterns": "tsx tests/benchmark_cassandra_patterns.ts",
+    "experiment:all": "tsx tests/benchmark_redis_vs_cassandra.ts && tsx tests/test_flight_recorder.ts && tsx tests/benchmark_cassandra_patterns.ts"
   },
   "dependencies": {
     "@fastify/static": "^10.1.4",
     "@fastify/websocket": "^11.3.0",
+    "cassandra-driver": "^4.10.0",
     "dotenv": "^18.0.3",
     "fastify": "^5.12.5",
     "ioredis": "^6.0.0",
@@ -54,6 +61,7 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
+    "@types/cassandra-driver": "^4.2.4",
     "@types/ioredis": "^5.0.0",
     "@types/leaflet": "^1.9.22",
     "@types/node": "^26.6.1",
